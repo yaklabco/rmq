@@ -444,7 +444,14 @@ impl ServerChannel {
                                 }
 
                                 if envelopes.is_empty() {
-                                    queue.wait_for_message().await;
+                                    // Wait briefly for new messages. Use a short timeout
+                                    // so we periodically retry the store (which may have
+                                    // messages from overflow or requeue).
+                                    tokio::select! {
+                                        biased;
+                                        _ = queue.wait_for_message() => {}
+                                        _ = tokio::time::sleep(tokio::time::Duration::from_millis(1)) => {}
+                                    }
                                     continue;
                                 }
 

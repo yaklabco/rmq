@@ -42,7 +42,7 @@ pub struct DeadLetter {
 }
 
 /// Fast-path ring buffer capacity.
-const FAST_PATH_CAPACITY: usize = 16384;
+const FAST_PATH_CAPACITY: usize = 131072;
 
 /// A message queue with a fast-path delivery channel.
 ///
@@ -64,6 +64,11 @@ pub struct Queue {
     /// Fast-path: bounded channel from publisher to consumer.
     fast_tx: tokio::sync::mpsc::Sender<Envelope>,
     fast_rx: Mutex<tokio::sync::mpsc::Receiver<Envelope>>,
+
+    /// Positions delivered via the fast-path channel but not yet consumer-acked.
+    /// These are skipped by the store fallback to prevent duplicate delivery.
+    /// When the consumer acks, positions are moved from here to the store's ack set.
+    channel_delivered: Mutex<std::collections::HashSet<(u32, u32)>>,
 
     // Parsed queue arguments
     message_ttl: Option<u64>,
@@ -113,6 +118,7 @@ impl Queue {
                 publish_notify: Notify::new(),
                 fast_tx,
                 fast_rx: Mutex::new(fast_rx),
+                channel_delivered: Mutex::new(std::collections::HashSet::new()),
                 message_ttl,
                 max_length,
                 max_length_bytes,
@@ -258,11 +264,12 @@ impl Queue {
                 };
                 return Ok((None, dl));
             }
-            // Mark as delivered in the store so the store fallback won't
-            // re-deliver this message. The consumer still tracks it as
-            // unacked — if the consumer disconnects, ServerChannel::Drop
-            // requeues it back into the store.
-            self.store.lock().ack(&env.segment_position)?;
+            // Track this position so the store fallback skips it.
+            // Don't ack in the store yet — the consumer hasn't acked.
+            // If the consumer disconnects, ServerChannel::Drop requeues it.
+            self.channel_delivered.lock().insert(
+                (env.segment_position.segment, env.segment_position.position),
+            );
             return Ok((Some(env), vec![]));
         }
 
@@ -272,6 +279,13 @@ impl Queue {
         loop {
             match store.shift()? {
                 Some(env) => {
+                    // If already delivered via channel, ack to advance past it
+                    if self.channel_delivered.lock().contains(
+                        &(env.segment_position.segment, env.segment_position.position),
+                    ) {
+                        store.ack(&env.segment_position)?;
+                        continue;
+                    }
                     if self.is_expired(&env.message, now) {
                         store.ack(&env.segment_position)?;
                         if self.dead_letter_exchange.is_some() {
@@ -287,6 +301,7 @@ impl Queue {
     }
 
     /// Consume up to `max` messages. Fast-path channel first, then store fallback.
+    /// Uses a single store lock acquisition for all ack + shift operations.
     pub fn shift_batch(
         &self,
         max: usize,
@@ -294,9 +309,9 @@ impl Queue {
         let now = now_millis();
         let mut envelopes = Vec::with_capacity(max);
         let mut dead_letters = Vec::new();
-
-        // Phase 1: drain fast-path channel
         let mut channel_positions = Vec::new();
+
+        // Phase 1: drain fast-path channel (no store lock)
         {
             let mut rx = self.fast_rx.lock();
             while envelopes.len() < max {
@@ -317,22 +332,27 @@ impl Queue {
             }
         }
 
-        // Mark channel-delivered messages as acked in the store so the
-        // store fallback won't re-deliver them. Consumer still tracks
-        // them as unacked in ServerChannel.
+        // Track channel-delivered positions (no store lock needed)
         if !channel_positions.is_empty() {
-            let mut store = self.store.lock();
+            let mut delivered = self.channel_delivered.lock();
             for sp in &channel_positions {
-                store.ack(sp)?;
+                delivered.insert((sp.segment, sp.position));
             }
         }
 
-        // Phase 2: fall back to store for requeued/overflow messages
+        // Phase 2: store fallback for overflow/requeued messages
         if envelopes.len() < max {
             let mut store = self.store.lock();
             while envelopes.len() < max {
                 match store.shift()? {
                     Some(env) => {
+                        // If already delivered via channel, ack it in the store
+                        // to advance past it (consumer tracks it separately)
+                        let key = (env.segment_position.segment, env.segment_position.position);
+                        if self.channel_delivered.lock().contains(&key) {
+                            store.ack(&env.segment_position)?;
+                            continue;
+                        }
                         if self.is_expired(&env.message, now) {
                             store.ack(&env.segment_position)?;
                             if self.dead_letter_exchange.is_some() {
@@ -352,6 +372,12 @@ impl Queue {
 
     /// Acknowledge multiple messages.
     pub fn ack_batch(&self, positions: &[SegmentPosition]) -> std::io::Result<()> {
+        {
+            let mut delivered = self.channel_delivered.lock();
+            for sp in positions {
+                delivered.remove(&(sp.segment, sp.position));
+            }
+        }
         let mut store = self.store.lock();
         for sp in positions {
             store.ack(sp)?;
@@ -364,6 +390,7 @@ impl Queue {
     }
 
     pub fn ack(&self, sp: &SegmentPosition) -> std::io::Result<()> {
+        self.channel_delivered.lock().remove(&(sp.segment, sp.position));
         self.store.lock().ack(sp)
     }
 
