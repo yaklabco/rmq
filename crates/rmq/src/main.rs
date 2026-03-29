@@ -73,6 +73,20 @@ async fn main() -> anyhow::Result<()> {
     let vhost = Arc::new(VHost::new("/".into(), &vhost_dir)?);
     info!("default vhost '/' initialized");
 
+    // Start flush coordinator — batches fsync every 2ms for all queues
+    let flush_vhost = vhost.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(2));
+        loop {
+            interval.tick().await;
+            for queue_name in flush_vhost.queue_names() {
+                if let Some(queue) = flush_vhost.get_queue(&queue_name) {
+                    let _ = queue.flush_if_needed();
+                }
+            }
+        }
+    });
+
     // Start Management API in background
     let mgmt_vhost = vhost.clone();
     let mgmt_users = user_store.clone();

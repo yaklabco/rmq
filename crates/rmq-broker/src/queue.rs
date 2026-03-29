@@ -60,6 +60,11 @@ pub struct Queue {
     store: Mutex<MessageStore>,
     consumer_count: AtomicU64,
     publish_notify: Notify,
+    /// Flag indicating pending writes need fsync. The flush coordinator
+    /// checks this periodically and batches the fsync.
+    pending_flush: std::sync::atomic::AtomicBool,
+    /// Notified after a batch fsync completes. Publisher confirms wait on this.
+    flush_complete: Notify,
 
     /// Fast-path: bounded channel from publisher to consumer.
     fast_tx: tokio::sync::mpsc::Sender<Envelope>,
@@ -116,6 +121,8 @@ impl Queue {
                 store: Mutex::new(store),
                 consumer_count: AtomicU64::new(0),
                 publish_notify: Notify::new(),
+                pending_flush: std::sync::atomic::AtomicBool::new(false),
+                flush_complete: Notify::new(),
                 fast_tx,
                 fast_rx: Mutex::new(fast_rx),
                 channel_delivered: Mutex::new(std::collections::HashSet::new()),
@@ -174,13 +181,15 @@ impl Queue {
             }
         }
 
-        // Use durable write (fsync) for persistent messages on durable queues
+        let sp = store.push(msg)?;
         let needs_fsync = self.config.durable && msg.properties.is_persistent();
-        let sp = if needs_fsync {
-            store.push_durable(msg)?
-        } else {
-            store.push(msg)?
-        };
+
+        // For durable messages: request async flush. The flush coordinator
+        // batches multiple messages into a single msync every few ms.
+        // The caller (publisher confirm) waits for the flush to complete.
+        if needs_fsync {
+            self.pending_flush.store(true, Ordering::Release);
+        }
 
         // Drop-head overflow: drop from store AND drain corresponding channel entries
         if self.overflow == OverflowPolicy::DropHead {
@@ -244,6 +253,24 @@ impl Queue {
     /// Wait for a message to be available.
     pub async fn wait_for_message(&self) {
         self.publish_notify.notified().await;
+    }
+
+    /// Perform a batched fsync if there are pending durable writes.
+    /// Called periodically by a background task. Wakes all publishers
+    /// waiting for their confirms.
+    pub fn flush_if_needed(&self) -> std::io::Result<bool> {
+        if !self.pending_flush.swap(false, Ordering::AcqRel) {
+            return Ok(false);
+        }
+        self.store.lock().sync()?;
+        self.flush_complete.notify_waiters();
+        Ok(true)
+    }
+
+    /// Wait for the next batch fsync to complete.
+    /// Publisher confirms call this after publish to ensure durability.
+    pub async fn wait_for_flush(&self) {
+        self.flush_complete.notified().await;
     }
 
     /// Consume the next message. Checks fast-path channel first, then falls

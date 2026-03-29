@@ -109,19 +109,8 @@ impl MessageStore {
     }
 
     /// Push a message into the store. Returns the segment position.
-    /// Push a message to the store. Does NOT fsync — use `push_durable` for
-    /// messages that must survive crashes.
+    /// Does NOT fsync — call `flush_async()` or `sync()` separately.
     pub fn push(&mut self, msg: &StoredMessage) -> io::Result<SegmentPosition> {
-        self.push_inner(msg, false)
-    }
-
-    /// Push a message and fsync to disk. Guarantees the message survives
-    /// process crash and power failure.
-    pub fn push_durable(&mut self, msg: &StoredMessage) -> io::Result<SegmentPosition> {
-        self.push_inner(msg, true)
-    }
-
-    fn push_inner(&mut self, msg: &StoredMessage, durable: bool) -> io::Result<SegmentPosition> {
         self.encode_buf.clear();
         encode_message_to(msg, &mut self.encode_buf);
         let bytesize = self.encode_buf.len() as u32;
@@ -137,11 +126,7 @@ impl MessageStore {
         }
 
         let seg = self.write_segment.as_mut().unwrap();
-        let position = if durable {
-            seg.append_durable(&self.encode_buf)?
-        } else {
-            seg.append(&self.encode_buf)?
-        };
+        let position = seg.append(&self.encode_buf)?;
 
         let sp = SegmentPosition::new(self.write_segment_id, position, bytesize);
         self.message_count += 1;
