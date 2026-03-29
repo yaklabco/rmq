@@ -84,6 +84,21 @@ enum Command {
         #[arg(short, long, default_value = "100")]
         prefetch: u16,
     },
+    /// Sharded throughput: N independent queue pairs in parallel
+    Sharded {
+        /// Total messages across all shards
+        #[arg(short = 'n', long, default_value = "1000000")]
+        count: u64,
+        /// Message body size in bytes
+        #[arg(short, long, default_value = "128")]
+        size: usize,
+        /// Number of queue shards (each gets 1 publisher + 1 consumer)
+        #[arg(long, default_value = "8")]
+        shards: u32,
+        /// Prefetch count per consumer
+        #[arg(short, long, default_value = "500")]
+        prefetch: u16,
+    },
 }
 
 #[tokio::main]
@@ -130,6 +145,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             prefetch,
         } => {
             run_throughput(&cli.uri, count, size, publishers, consumers, prefetch).await?;
+        }
+        Command::Sharded {
+            count,
+            size,
+            shards,
+            prefetch,
+        } => {
+            run_sharded(&cli.uri, count, size, shards, prefetch).await?;
         }
     }
 
@@ -509,6 +532,165 @@ async fn run_throughput(
         (total_pub as f64 * size as f64) / elapsed.as_secs_f64() / 1_000_000.0,
         (total_con as f64 * size as f64) / elapsed.as_secs_f64() / 1_000_000.0,
     );
+
+    Ok(())
+}
+
+async fn run_sharded(
+    uri: &str,
+    count: u64,
+    size: usize,
+    shards: u32,
+    prefetch: u16,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let per_shard = count / shards as u64;
+    let body = vec![b'x'; size];
+
+    println!(
+        "Sharded throughput: {} msgs x {}B across {} independent queues, prefetch={}",
+        count, size, shards, prefetch
+    );
+
+    // Setup: declare all queues
+    let conn = Connection::connect(uri, ConnectionProperties::default()).await?;
+    let ch = conn.create_channel().await?;
+    for i in 0..shards {
+        let qname = format!("shard-{i}");
+        ch.queue_declare(&qname, QueueDeclareOptions::default(), FieldTable::default())
+            .await?;
+        ch.queue_purge(&qname, QueuePurgeOptions::default()).await?;
+    }
+    drop(ch);
+    drop(conn);
+
+    let published = Arc::new(AtomicU64::new(0));
+    let consumed = Arc::new(AtomicU64::new(0));
+    let start = Instant::now();
+
+    let mut handles = Vec::new();
+
+    // Each shard gets its own connection pair (1 pub + 1 con)
+    for shard in 0..shards {
+        let uri_pub = uri.to_string();
+        let uri_con = uri.to_string();
+        let body = body.clone();
+        let published = published.clone();
+        let consumed = consumed.clone();
+        let qname = format!("shard-{shard}");
+        let qname2 = qname.clone();
+
+        // Consumer for this shard
+        handles.push(tokio::spawn(async move {
+            let conn = Connection::connect(&uri_con, ConnectionProperties::default())
+                .await
+                .unwrap();
+            let ch = conn.create_channel().await.unwrap();
+            ch.basic_qos(prefetch, BasicQosOptions { global: false })
+                .await
+                .unwrap();
+
+            let mut consumer = ch
+                .basic_consume(
+                    &qname2,
+                    &format!("shard-con-{shard}"),
+                    BasicConsumeOptions::default(),
+                    FieldTable::default(),
+                )
+                .await
+                .unwrap();
+
+            while let Some(delivery) = consumer.next().await {
+                if let Ok(delivery) = delivery {
+                    delivery.ack(BasicAckOptions::default()).await.unwrap();
+                    consumed.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }));
+
+        // Publisher for this shard
+        handles.push(tokio::spawn(async move {
+            // Small delay so consumer starts first
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let conn = Connection::connect(&uri_pub, ConnectionProperties::default())
+                .await
+                .unwrap();
+            let ch = conn.create_channel().await.unwrap();
+
+            for _ in 0..per_shard {
+                ch.basic_publish(
+                    "",
+                    &qname,
+                    BasicPublishOptions::default(),
+                    &body,
+                    BasicProperties::default(),
+                )
+                .await
+                .unwrap();
+                published.fetch_add(1, Ordering::Relaxed);
+            }
+        }));
+    }
+
+    // Progress reporter
+    let pub_c = published.clone();
+    let con_c = consumed.clone();
+    let reporter = tokio::spawn(async move {
+        let mut last_pub = 0u64;
+        let mut last_con = 0u64;
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let p = pub_c.load(Ordering::Relaxed);
+            let c = con_c.load(Ordering::Relaxed);
+            eprint!(
+                "\r  pub: {} ({}/s)  con: {} ({}/s)    ",
+                p, p - last_pub, c, c - last_con
+            );
+            last_pub = p;
+            last_con = c;
+            if c >= count {
+                break;
+            }
+        }
+    });
+
+    // Wait for all publishers to finish
+    // (consumers run indefinitely until aborted)
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let p = published.load(Ordering::Relaxed);
+        let c = consumed.load(Ordering::Relaxed);
+        if c >= count {
+            break;
+        }
+        if Instant::now() > deadline {
+            eprintln!("\nWarning: didn't finish within timeout (pub={p}, con={c})");
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    reporter.abort();
+    for h in handles {
+        h.abort();
+    }
+
+    let elapsed = start.elapsed();
+    let total_pub = published.load(Ordering::Relaxed);
+    let total_con = consumed.load(Ordering::Relaxed);
+    let pub_rate = total_pub as f64 / elapsed.as_secs_f64();
+    let con_rate = total_con as f64 / elapsed.as_secs_f64();
+
+    println!("\r                                                          ");
+    println!("Results ({shards} shards):");
+    println!("  Published: {total_pub} ({:.0} msg/s)", pub_rate);
+    println!("  Consumed:  {total_con} ({:.0} msg/s)", con_rate);
+    println!("  Time:      {:.2}s", elapsed.as_secs_f64());
+    println!(
+        "  Throughput: {:.1} MB/s (pub), {:.1} MB/s (con)",
+        (total_pub as f64 * size as f64) / elapsed.as_secs_f64() / 1_000_000.0,
+        (total_con as f64 * size as f64) / elapsed.as_secs_f64() / 1_000_000.0,
+    );
+    println!("  Per-shard:  {:.0} msg/s", con_rate / shards as f64);
 
     Ok(())
 }

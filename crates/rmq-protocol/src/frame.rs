@@ -342,24 +342,30 @@ impl AMQPFrame {
     pub fn encode(&self, buf: &mut BytesMut) {
         match &self.payload {
             FramePayload::Method(method) => {
-                let mut payload_buf = BytesMut::new();
-                method.encode(&mut payload_buf);
+                // Write header with placeholder size, encode in-place, patch size
                 buf.put_u8(FRAME_METHOD);
                 buf.put_u16(self.channel);
-                buf.put_u32(payload_buf.len() as u32);
-                buf.extend_from_slice(&payload_buf);
+                let size_offset = buf.len();
+                buf.put_u32(0); // placeholder
+                let payload_start = buf.len();
+                method.encode(buf);
+                let payload_len = (buf.len() - payload_start) as u32;
+                // Patch the size field
+                buf[size_offset..size_offset + 4].copy_from_slice(&payload_len.to_be_bytes());
                 buf.put_u8(FRAME_END);
             }
             FramePayload::Header(header) => {
-                let mut payload_buf = BytesMut::new();
-                payload_buf.put_u16(header.class_id);
-                payload_buf.put_u16(0); // weight, always 0
-                payload_buf.put_u64(header.body_size);
-                header.properties.encode(&mut payload_buf);
                 buf.put_u8(FRAME_HEADER);
                 buf.put_u16(self.channel);
-                buf.put_u32(payload_buf.len() as u32);
-                buf.extend_from_slice(&payload_buf);
+                let size_offset = buf.len();
+                buf.put_u32(0); // placeholder
+                let payload_start = buf.len();
+                buf.put_u16(header.class_id);
+                buf.put_u16(0); // weight
+                buf.put_u64(header.body_size);
+                header.properties.encode(buf);
+                let payload_len = (buf.len() - payload_start) as u32;
+                buf[size_offset..size_offset + 4].copy_from_slice(&payload_len.to_be_bytes());
                 buf.put_u8(FRAME_END);
             }
             FramePayload::Body(data) => {
