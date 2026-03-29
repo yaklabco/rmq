@@ -80,6 +80,22 @@ impl AckStore {
         &self.path
     }
 
+    /// Acknowledge a batch of positions in a single write.
+    pub fn ack_batch(&mut self, positions: &[u32]) -> io::Result<u32> {
+        let mut buf = Vec::with_capacity(positions.len() * 4);
+        let mut count = 0u32;
+        for &pos in positions {
+            if self.deleted.insert(pos) {
+                buf.extend_from_slice(&pos.to_le_bytes());
+                count += 1;
+            }
+        }
+        if !buf.is_empty() {
+            self.file.write_all(&buf)?;
+        }
+        Ok(count)
+    }
+
     /// Flush the ack file to the OS buffer (not guaranteed to reach disk).
     pub fn flush(&mut self) -> io::Result<()> {
         self.file.flush()

@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
@@ -230,7 +230,7 @@ impl Queue {
         // the store (which has all un-acked messages).
         let envelope = Envelope {
             segment_position: sp,
-            message: msg.clone(),
+            message: Arc::new(msg.clone()),
             redelivered: false,
         };
         let _ = self.fast_tx.try_send(envelope);
@@ -274,13 +274,15 @@ impl Queue {
         }
 
         // Slow path: check store for requeued messages and overflow
+        let delivered_snapshot: std::collections::HashSet<(u32, u32)> =
+            self.channel_delivered.lock().clone();
         let mut store = self.store.lock();
         let mut dead_letters = Vec::new();
         loop {
             match store.shift()? {
                 Some(env) => {
                     // If already delivered via channel, ack to advance past it
-                    if self.channel_delivered.lock().contains(
+                    if delivered_snapshot.contains(
                         &(env.segment_position.segment, env.segment_position.position),
                     ) {
                         store.ack(&env.segment_position)?;
@@ -342,6 +344,8 @@ impl Queue {
 
         // Phase 2: store fallback for overflow/requeued messages
         if envelopes.len() < max {
+            let delivered_snapshot: std::collections::HashSet<(u32, u32)> =
+                self.channel_delivered.lock().clone();
             let mut store = self.store.lock();
             while envelopes.len() < max {
                 match store.shift()? {
@@ -349,7 +353,7 @@ impl Queue {
                         // If already delivered via channel, ack it in the store
                         // to advance past it (consumer tracks it separately)
                         let key = (env.segment_position.segment, env.segment_position.position);
-                        if self.channel_delivered.lock().contains(&key) {
+                        if delivered_snapshot.contains(&key) {
                             store.ack(&env.segment_position)?;
                             continue;
                         }
@@ -481,7 +485,7 @@ impl Queue {
     }
 
     fn make_dead_letter(&self, env: Envelope, reason: &str) -> DeadLetter {
-        let mut msg = env.message;
+        let mut msg = (*env.message).clone();
         let mut headers = msg.properties.headers.take().unwrap_or_default();
         let mut death = FieldTable::new();
         death.insert("reason", FieldValue::ShortString(reason.to_string()));

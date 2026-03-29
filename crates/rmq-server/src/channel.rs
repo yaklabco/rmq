@@ -464,7 +464,7 @@ impl ServerChannel {
                                     let delivery_tag = next_tag.fetch_add(1, Ordering::Relaxed) + 1;
                                     let sp = env.segment_position;
                                     let redelivered = env.redelivered;
-                                    let msg = env.message;
+                                    let msg = &env.message;
                                     let body_len = msg.body.len() as u64;
 
                                     let deliver = AMQPFrame {
@@ -474,8 +474,8 @@ impl ServerChannel {
                                                 consumer_tag: tag.clone(),
                                                 delivery_tag,
                                                 redelivered,
-                                                exchange: msg.exchange,
-                                                routing_key: msg.routing_key,
+                                                exchange: msg.exchange.clone(),
+                                                routing_key: msg.routing_key.clone(),
                                             },
                                         )),
                                     };
@@ -485,13 +485,13 @@ impl ServerChannel {
                                         payload: FramePayload::Header(ContentHeader {
                                             class_id: CLASS_BASIC,
                                             body_size: body_len,
-                                            properties: msg.properties,
+                                            properties: msg.properties.clone(),
                                         }),
                                     };
 
                                     let body = AMQPFrame {
                                         channel: channel_id,
-                                        payload: FramePayload::Body(msg.body),
+                                        payload: FramePayload::Body(msg.body.clone()),
                                     };
 
                                     if tx.send(deliver).is_err()
@@ -681,7 +681,7 @@ impl ServerChannel {
 
                         let delivery_tag = self.next_delivery_tag.fetch_add(1, Ordering::Relaxed) + 1;
                         let sp = env.segment_position;
-                        let msg = env.message;
+                        let msg = &env.message;
                         let body_len = msg.body.len() as u64;
 
                         if !get.no_ack {
@@ -698,8 +698,8 @@ impl ServerChannel {
                             payload: FramePayload::Method(MethodFrame::BasicGetOk(BasicGetOk {
                                 delivery_tag,
                                 redelivered: env.redelivered,
-                                exchange: msg.exchange,
-                                routing_key: msg.routing_key,
+                                exchange: msg.exchange.clone(),
+                                routing_key: msg.routing_key.clone(),
                                 message_count: queue.message_count() as u32,
                             })),
                         };
@@ -710,14 +710,14 @@ impl ServerChannel {
                             payload: FramePayload::Header(ContentHeader {
                                 class_id: CLASS_BASIC,
                                 body_size: body_len,
-                                properties: msg.properties,
+                                properties: msg.properties.clone(),
                             }),
                         };
                         self.tx.send(header)?;
 
                         let body = AMQPFrame {
                             channel: self.id,
-                            payload: FramePayload::Body(msg.body),
+                            payload: FramePayload::Body(msg.body.clone()),
                         };
                         self.tx.send(body)?;
 

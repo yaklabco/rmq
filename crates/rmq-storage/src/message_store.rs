@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use bytes::{BufMut, BytesMut};
 use rmq_protocol::field_table::encode_short_string;
@@ -17,7 +18,7 @@ use crate::segment_position::SegmentPosition;
 #[derive(Debug, Clone)]
 pub struct Envelope {
     pub segment_position: SegmentPosition,
-    pub message: StoredMessage,
+    pub message: Arc<StoredMessage>,
     pub redelivered: bool,
 }
 
@@ -68,6 +69,9 @@ pub struct MessageStore {
     /// Requeued messages.
     requeued: RequeuedStore,
 
+    /// Reusable encode buffer to avoid per-message allocation.
+    encode_buf: BytesMut,
+
     /// Message count and byte size.
     message_count: u64,
     byte_size: u64,
@@ -90,6 +94,7 @@ impl MessageStore {
             read_segment_id: 1,
             read_position: 0,
             requeued: RequeuedStore::new(),
+            encode_buf: BytesMut::with_capacity(8192),
             message_count: 0,
             byte_size: 0,
         };
@@ -117,11 +122,12 @@ impl MessageStore {
     }
 
     fn push_inner(&mut self, msg: &StoredMessage, durable: bool) -> io::Result<SegmentPosition> {
-        let encoded = encode_message(msg);
-        let bytesize = encoded.len() as u32;
+        self.encode_buf.clear();
+        encode_message_to(msg, &mut self.encode_buf);
+        let bytesize = self.encode_buf.len() as u32;
 
         if let Some(ref seg) = self.write_segment {
-            if !seg.has_room(encoded.len()) {
+            if !seg.has_room(self.encode_buf.len()) {
                 self.rotate_segment()?;
             }
         }
@@ -132,9 +138,9 @@ impl MessageStore {
 
         let seg = self.write_segment.as_mut().unwrap();
         let position = if durable {
-            seg.append_durable(&encoded)?
+            seg.append_durable(&self.encode_buf)?
         } else {
-            seg.append(&encoded)?
+            seg.append(&self.encode_buf)?
         };
 
         let sp = SegmentPosition::new(self.write_segment_id, position, bytesize);
@@ -167,7 +173,7 @@ impl MessageStore {
             let msg = self.read_at(&sp)?;
             return Ok(Some(Envelope {
                 segment_position: sp,
-                message: msg,
+                message: Arc::new(msg),
                 redelivered: true,
             }));
         }
@@ -182,7 +188,7 @@ impl MessageStore {
             let msg = self.read_at(&sp)?;
             return Ok(Some(Envelope {
                 segment_position: sp,
-                message: msg,
+                message: Arc::new(msg),
                 redelivered: true,
             }));
         }
@@ -331,7 +337,7 @@ impl MessageStore {
 
                     return Ok(Some(Envelope {
                         segment_position: SegmentPosition::new(read_seg_id, pos, bytesize),
-                        message,
+                        message: Arc::new(message),
                         redelivered: false,
                     }));
                 }
@@ -394,7 +400,7 @@ impl MessageStore {
 
             return Ok(Some(Envelope {
                 segment_position: sp,
-                message,
+                message: Arc::new(message),
                 redelivered: false,
             }));
         }
@@ -507,22 +513,18 @@ impl MessageStore {
 
 // --- Message encoding/decoding ---
 
+fn encode_message_to(msg: &StoredMessage, buf: &mut BytesMut) {
+    buf.put_i64(msg.timestamp);
+    encode_short_string(buf, &msg.exchange);
+    encode_short_string(buf, &msg.routing_key);
+    msg.properties.encode(buf);
+    buf.put_u64(msg.body.len() as u64);
+    buf.put_slice(&msg.body);
+}
+
 fn encode_message(msg: &StoredMessage) -> Vec<u8> {
     let mut buf = BytesMut::with_capacity(msg.bytesize());
-
-    // timestamp: i64
-    buf.put_i64(msg.timestamp);
-    // exchange: short string
-    encode_short_string(&mut buf, &msg.exchange);
-    // routing_key: short string
-    encode_short_string(&mut buf, &msg.routing_key);
-    // properties
-    msg.properties.encode(&mut buf);
-    // bodysize: u64
-    buf.put_u64(msg.body.len() as u64);
-    // body
-    buf.put_slice(&msg.body);
-
+    encode_message_to(msg, &mut buf);
     buf.to_vec()
 }
 

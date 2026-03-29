@@ -82,6 +82,9 @@ impl Connection {
             return;
         }
 
+        // Reusable frame read buffer
+        let mut frame_buf = BytesMut::with_capacity(65536);
+
         // Create frame sender/receiver for write task
         let (tx, mut rx) = mpsc::unbounded_channel::<AMQPFrame>();
 
@@ -156,7 +159,7 @@ impl Connection {
         }
 
         // Read Connection.StartOk
-        let frame = match read_frame(&mut reader).await {
+        let frame = match read_frame(&mut reader, &mut frame_buf).await {
             Ok(Some(f)) => f,
             _ => {
                 error!("failed to read StartOk");
@@ -204,7 +207,7 @@ impl Connection {
         }
 
         // Read Connection.TuneOk
-        let frame = match read_frame(&mut reader).await {
+        let frame = match read_frame(&mut reader, &mut frame_buf).await {
             Ok(Some(f)) => f,
             _ => {
                 error!("failed to read TuneOk");
@@ -233,7 +236,7 @@ impl Connection {
         let heartbeat = tune_ok.heartbeat;
 
         // Read Connection.Open
-        let frame = match read_frame(&mut reader).await {
+        let frame = match read_frame(&mut reader, &mut frame_buf).await {
             Ok(Some(f)) => f,
             _ => {
                 error!("failed to read ConnectionOpen");
@@ -310,7 +313,7 @@ impl Connection {
 
         loop {
             let frame_result = if let Some(timeout) = read_timeout {
-                match tokio::time::timeout(timeout, read_frame(&mut reader)).await {
+                match tokio::time::timeout(timeout, read_frame(&mut reader, &mut frame_buf)).await {
                     Ok(result) => result,
                     Err(_) => {
                         info!("heartbeat timeout from {peer_addr}");
@@ -318,7 +321,7 @@ impl Connection {
                     }
                 }
             } else {
-                read_frame(&mut reader).await
+                read_frame(&mut reader, &mut frame_buf).await
             };
 
             let frame = match frame_result {
@@ -463,6 +466,7 @@ fn extract_credentials(mechanism: &str, response: &[u8]) -> Option<(String, Stri
 /// Read a single AMQP frame from the reader using a reusable buffer.
 async fn read_frame<R: AsyncRead + Unpin>(
     reader: &mut BufReader<R>,
+    frame_buf: &mut BytesMut,
 ) -> Result<Option<AMQPFrame>, Box<dyn std::error::Error + Send + Sync>> {
     // Read frame header: type(1) + channel(2) + size(4) = 7 bytes
     let mut header = [0u8; 7];
@@ -474,16 +478,17 @@ async fn read_frame<R: AsyncRead + Unpin>(
 
     let size = u32::from_be_bytes([header[3], header[4], header[5], header[6]]);
 
-    // Read payload + frame end into a BytesMut to avoid double copy
+    // Reuse the provided buffer to avoid per-frame allocation
     let total = 7 + size as usize + 1;
-    let mut frame_buf = BytesMut::with_capacity(total);
+    frame_buf.clear();
+    frame_buf.reserve(total);
     frame_buf.extend_from_slice(&header);
 
     // Read remaining bytes directly into the BytesMut
     frame_buf.resize(total, 0);
     reader.read_exact(&mut frame_buf[7..]).await?;
 
-    let mut bytes = frame_buf.freeze();
+    let mut bytes = frame_buf.split().freeze();
     let frame = AMQPFrame::decode(&mut bytes)?;
     Ok(Some(frame))
 }

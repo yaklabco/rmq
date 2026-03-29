@@ -93,7 +93,7 @@ pub async fn run_federation_link(
                 }
 
                 // Republish with incremented hop count
-                let mut msg = env.message.clone();
+                let mut msg = (*env.message).clone();
                 increment_hop_count(&mut msg);
                 msg.exchange = upstream.exchange.clone();
 

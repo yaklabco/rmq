@@ -232,7 +232,7 @@ async fn deliver_batch(
 
     for env in envelopes {
         positions.push(env.segment_position);
-        bodies.push(env.message.body);
+        bodies.push(env.message.body.clone());
     }
 
     state.unacked_batches.push(UnackedBatch { batch_id, positions });
