@@ -6,12 +6,45 @@ use parking_lot::RwLock;
 use rmq_protocol::field_table::FieldTable;
 use rmq_storage::message::StoredMessage;
 use rmq_storage::message_store::MessageStore;
+use serde::{Deserialize, Serialize};
 
 use crate::exchange::{
     DefaultExchange, Destination, DirectExchange, Exchange, ExchangeConfig, FanoutExchange,
     HeadersExchange, TopicExchange, create_exchange,
 };
 use crate::queue::{Queue, QueueConfig};
+
+/// Persisted metadata for durable queues and exchanges.
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct VHostMetadata {
+    queues: Vec<QueueMeta>,
+    exchanges: Vec<ExchangeMeta>,
+    bindings: Vec<BindingMeta>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct QueueMeta {
+    name: String,
+    durable: bool,
+    exclusive: bool,
+    auto_delete: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ExchangeMeta {
+    name: String,
+    exchange_type: String,
+    durable: bool,
+    auto_delete: bool,
+    internal: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct BindingMeta {
+    queue: String,
+    exchange: String,
+    routing_key: String,
+}
 
 /// A virtual host containing exchanges, queues, and their bindings.
 pub struct VHost {
@@ -35,6 +68,9 @@ impl VHost {
 
         // Create default exchanges
         vhost.declare_default_exchanges();
+
+        // Restore persisted metadata (durable queues, exchanges, bindings)
+        vhost.load_metadata();
 
         Ok(vhost)
     }
@@ -127,6 +163,8 @@ impl VHost {
             config.name.clone(),
             Arc::new(RwLock::new(exchange)),
         );
+        drop(exchanges);
+        self.save_metadata();
         Ok(true)
     }
 
@@ -142,6 +180,8 @@ impl VHost {
         if exchanges.remove(name).is_none() {
             return Err(VHostError::NotFound(format!("exchange '{name}' not found")));
         }
+        drop(exchanges);
+        self.save_metadata();
         Ok(())
     }
 
@@ -186,6 +226,10 @@ impl VHost {
 
         let queue = Arc::new(Queue::new(config.clone(), store));
         queues.insert(config.name.clone(), queue.clone());
+        drop(queues);
+        if config.durable {
+            self.save_metadata();
+        }
         Ok(queue)
     }
 
@@ -208,6 +252,9 @@ impl VHost {
                 &FieldTable::new(),
             );
         }
+        drop(exchanges);
+        drop(queues);
+        self.save_metadata();
 
         Ok(count)
     }
@@ -326,6 +373,114 @@ impl VHost {
     /// List all queue names.
     pub fn queue_names(&self) -> Vec<String> {
         self.queues.read().keys().cloned().collect()
+    }
+
+    // --- Metadata persistence ---
+
+    fn metadata_path(&self) -> PathBuf {
+        self.data_dir.join("metadata.json")
+    }
+
+    /// Persist current durable queue/exchange/binding metadata to disk.
+    fn save_metadata(&self) {
+        let mut meta = VHostMetadata::default();
+
+        // Save durable exchanges (skip builtins)
+        for name in self.exchange_names() {
+            if name.is_empty() || name.starts_with("amq.") {
+                continue;
+            }
+            if let Some(ex) = self.get_exchange(&name) {
+                let ex = ex.read();
+                if ex.is_durable() {
+                    meta.exchanges.push(ExchangeMeta {
+                        name: ex.name().to_string(),
+                        exchange_type: ex.exchange_type().to_string(),
+                        durable: true,
+                        auto_delete: ex.is_auto_delete(),
+                        internal: ex.is_internal(),
+                    });
+                }
+            }
+        }
+
+        // Save durable queues
+        for name in self.queue_names() {
+            if let Some(q) = self.get_queue(&name) {
+                if q.is_durable() {
+                    meta.queues.push(QueueMeta {
+                        name: q.name().to_string(),
+                        durable: true,
+                        exclusive: q.is_exclusive(),
+                        auto_delete: q.is_auto_delete(),
+                    });
+                }
+            }
+        }
+
+        // Write atomically via temp file
+        let path = self.metadata_path();
+        if let Ok(data) = serde_json::to_string_pretty(&meta) {
+            let tmp = path.with_extension("tmp");
+            let _ = std::fs::write(&tmp, &data);
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    }
+
+    /// Load persisted metadata and re-declare durable queues/exchanges.
+    fn load_metadata(&self) {
+        let path = self.metadata_path();
+        if !path.exists() {
+            return;
+        }
+
+        let data = match std::fs::read_to_string(&path) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+
+        let meta: VHostMetadata = match serde_json::from_str(&data) {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+
+        // Re-declare exchanges
+        for ex in &meta.exchanges {
+            let _ = self.declare_exchange(ExchangeConfig {
+                name: ex.name.clone(),
+                exchange_type: ex.exchange_type.clone(),
+                durable: ex.durable,
+                auto_delete: ex.auto_delete,
+                internal: ex.internal,
+                arguments: FieldTable::new(),
+            });
+        }
+
+        // Re-declare queues (this reopens their message stores)
+        for q in &meta.queues {
+            let _ = self.declare_queue(QueueConfig {
+                name: q.name.clone(),
+                durable: q.durable,
+                exclusive: q.exclusive,
+                auto_delete: q.auto_delete,
+                arguments: FieldTable::new(),
+            });
+        }
+
+        // Re-create bindings
+        for b in &meta.bindings {
+            let _ = self.bind_queue(&b.queue, &b.exchange, &b.routing_key, &FieldTable::new());
+        }
+
+        if !meta.queues.is_empty() || !meta.exchanges.is_empty() {
+            tracing::info!(
+                "vhost '{}': restored {} queues, {} exchanges, {} bindings from metadata",
+                self.name,
+                meta.queues.len(),
+                meta.exchanges.len(),
+                meta.bindings.len(),
+            );
+        }
     }
 }
 

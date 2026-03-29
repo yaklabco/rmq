@@ -177,7 +177,13 @@ impl Queue {
             }
         }
 
-        let sp = store.push(msg)?;
+        // Use durable write (fsync) for persistent messages on durable queues
+        let needs_fsync = self.config.durable && msg.properties.is_persistent();
+        let sp = if needs_fsync {
+            store.push_durable(msg)?
+        } else {
+            store.push(msg)?
+        };
 
         // Drop-head overflow: drop from store AND drain corresponding channel entries
         if self.overflow == OverflowPolicy::DropHead {
@@ -242,30 +248,46 @@ impl Queue {
         self.publish_notify.notified().await;
     }
 
-    /// Consume the next message from the fast-path channel.
+    /// Consume the next message. Checks fast-path channel first, then falls
+    /// back to the store (which contains requeued messages and overflow).
     pub fn shift(&self) -> std::io::Result<(Option<Envelope>, Vec<DeadLetter>)> {
         let now = now_millis();
-        let mut rx = self.fast_rx.lock();
 
-        match rx.try_recv() {
-            Ok(env) => {
-                if self.is_expired(&env.message, now) {
-                    self.store.lock().ack(&env.segment_position)?;
-                    let dl = if self.dead_letter_exchange.is_some() {
-                        vec![self.make_dead_letter(env, "expired")]
-                    } else {
-                        vec![]
-                    };
-                    Ok((None, dl))
+        // Fast path: try channel (no store lock)
+        if let Ok(env) = self.fast_rx.lock().try_recv() {
+            if self.is_expired(&env.message, now) {
+                self.store.lock().ack(&env.segment_position)?;
+                let dl = if self.dead_letter_exchange.is_some() {
+                    vec![self.make_dead_letter(env, "expired")]
                 } else {
-                    Ok((Some(env), vec![]))
-                }
+                    vec![]
+                };
+                return Ok((None, dl));
             }
-            Err(_) => Ok((None, vec![])),
+            return Ok((Some(env), vec![]));
+        }
+
+        // Slow path: check store for requeued messages and channel-overflow messages
+        let mut store = self.store.lock();
+        let mut dead_letters = Vec::new();
+        loop {
+            match store.shift()? {
+                Some(env) => {
+                    if self.is_expired(&env.message, now) {
+                        store.ack(&env.segment_position)?;
+                        if self.dead_letter_exchange.is_some() {
+                            dead_letters.push(self.make_dead_letter(env, "expired"));
+                        }
+                        continue;
+                    }
+                    return Ok((Some(env), dead_letters));
+                }
+                None => return Ok((None, dead_letters)),
+            }
         }
     }
 
-    /// Consume up to `max` messages from the fast-path channel.
+    /// Consume up to `max` messages. Fast-path channel first, then store fallback.
     pub fn shift_batch(
         &self,
         max: usize,
@@ -273,23 +295,47 @@ impl Queue {
         let now = now_millis();
         let mut envelopes = Vec::with_capacity(max);
         let mut dead_letters = Vec::new();
-        let mut rx = self.fast_rx.lock();
 
-        while envelopes.len() < max {
-            match rx.try_recv() {
-                Ok(env) => {
-                    if self.is_expired(&env.message, now) {
-                        self.store.lock().ack(&env.segment_position)?;
-                        if self.dead_letter_exchange.is_some() {
-                            dead_letters.push(self.make_dead_letter(env, "expired"));
+        // Phase 1: drain fast-path channel
+        {
+            let mut rx = self.fast_rx.lock();
+            while envelopes.len() < max {
+                match rx.try_recv() {
+                    Ok(env) => {
+                        if self.is_expired(&env.message, now) {
+                            self.store.lock().ack(&env.segment_position)?;
+                            if self.dead_letter_exchange.is_some() {
+                                dead_letters.push(self.make_dead_letter(env, "expired"));
+                            }
+                            continue;
                         }
-                        continue;
+                        envelopes.push(env);
                     }
-                    envelopes.push(env);
+                    Err(_) => break,
                 }
-                Err(_) => break,
             }
         }
+
+        // Phase 2: fall back to store for requeued/overflow messages
+        if envelopes.len() < max {
+            let mut store = self.store.lock();
+            while envelopes.len() < max {
+                match store.shift()? {
+                    Some(env) => {
+                        if self.is_expired(&env.message, now) {
+                            store.ack(&env.segment_position)?;
+                            if self.dead_letter_exchange.is_some() {
+                                dead_letters.push(self.make_dead_letter(env, "expired"));
+                            }
+                            continue;
+                        }
+                        envelopes.push(env);
+                    }
+                    None => break,
+                }
+            }
+        }
+
         Ok((envelopes, dead_letters))
     }
 

@@ -78,24 +78,38 @@ impl MessageStore {
     }
 
     /// Push a message into the store. Returns the segment position.
+    /// Push a message to the store. Does NOT fsync — use `push_durable` for
+    /// messages that must survive crashes.
     pub fn push(&mut self, msg: &StoredMessage) -> io::Result<SegmentPosition> {
+        self.push_inner(msg, false)
+    }
+
+    /// Push a message and fsync to disk. Guarantees the message survives
+    /// process crash and power failure.
+    pub fn push_durable(&mut self, msg: &StoredMessage) -> io::Result<SegmentPosition> {
+        self.push_inner(msg, true)
+    }
+
+    fn push_inner(&mut self, msg: &StoredMessage, durable: bool) -> io::Result<SegmentPosition> {
         let encoded = encode_message(msg);
         let bytesize = encoded.len() as u32;
 
-        // Rotate segment if needed
         if let Some(ref seg) = self.write_segment {
             if !seg.has_room(encoded.len()) {
                 self.rotate_segment()?;
             }
         }
 
-        // Ensure we have a write segment
         if self.write_segment.is_none() {
             self.create_write_segment()?;
         }
 
         let seg = self.write_segment.as_mut().unwrap();
-        let position = seg.append(&encoded)?;
+        let position = if durable {
+            seg.append_durable(&encoded)?
+        } else {
+            seg.append(&encoded)?
+        };
 
         let sp = SegmentPosition::new(self.write_segment_id, position, bytesize);
         self.message_count += 1;
@@ -175,12 +189,14 @@ impl MessageStore {
     }
 
     /// Flush all segments and ack files to disk.
+    /// Sync all data to disk (fsync). Guarantees all writes and acks
+    /// survive process crash and power failure.
     pub fn sync(&mut self) -> io::Result<()> {
         if let Some(ref seg) = self.write_segment {
-            seg.flush()?;
+            seg.flush()?; // msync for mmap
         }
         for ack in self.ack_stores.values_mut() {
-            ack.flush()?;
+            ack.sync()?; // fsync for ack files
         }
         Ok(())
     }

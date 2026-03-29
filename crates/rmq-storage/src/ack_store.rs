@@ -80,9 +80,15 @@ impl AckStore {
         &self.path
     }
 
-    /// Flush the ack file to disk.
+    /// Flush the ack file to the OS buffer (not guaranteed to reach disk).
     pub fn flush(&mut self) -> io::Result<()> {
         self.file.flush()
+    }
+
+    /// Sync the ack file to disk (fsync). Guarantees acks survive power failure.
+    pub fn sync(&mut self) -> io::Result<()> {
+        self.file.flush()?;
+        self.file.sync_all()
     }
 }
 

@@ -774,73 +774,58 @@ impl ServerChannel {
                     return Ok(());
                 }
 
-                // Apply buffered publishes
+                // Apply buffered publishes — collect errors
                 let publishes = std::mem::take(&mut self.tx_publishes);
+                let mut tx_errors: Vec<String> = Vec::new();
                 for tx_pub in publishes {
-                    let _ = self.vhost.publish(&tx_pub.exchange, &tx_pub.routing_key, &tx_pub.message);
+                    if let Err(e) = self.vhost.publish(&tx_pub.exchange, &tx_pub.routing_key, &tx_pub.message) {
+                        tx_errors.push(format!("publish to '{}': {e}", tx_pub.exchange));
+                    }
                 }
 
-                // Apply buffered acks
+                // Apply buffered acks — collect errors
                 let acks = std::mem::take(&mut self.tx_acks);
                 for tx_ack in acks {
-                    if tx_ack.nack {
-                        // Nack
-                        let mut unacked = self.shared.unacked.lock();
-                        let to_process: Vec<_> = if tx_ack.multiple {
-                            let items: Vec<_> = unacked.iter()
-                                .filter(|u| u.delivery_tag <= tx_ack.delivery_tag)
-                                .cloned().collect();
-                            unacked.retain(|u| u.delivery_tag > tx_ack.delivery_tag);
-                            items
-                        } else if let Some(pos) = unacked.iter().position(|u| u.delivery_tag == tx_ack.delivery_tag) {
-                            vec![unacked.remove(pos)]
-                        } else {
-                            vec![]
-                        };
-                        drop(unacked);
-                        let count = to_process.len() as u64;
-                        for entry in to_process {
-                            if let Some(queue) = self.vhost.get_queue(&entry.queue_name) {
-                                if tx_ack.requeue {
-                                    queue.requeue(entry.segment_position);
-                                } else {
-                                    let _ = queue.ack(&entry.segment_position);
-                                }
-                            }
-                        }
-                        if count > 0 {
-                            self.shared.unacked_count.fetch_sub(count, Ordering::Relaxed);
-                            self.shared.ack_notify.notify_waiters();
-                        }
+                    let mut unacked = self.shared.unacked.lock();
+                    let to_process: Vec<Unacked> = if tx_ack.multiple {
+                        let items: Vec<_> = unacked.iter()
+                            .filter(|u| u.delivery_tag <= tx_ack.delivery_tag)
+                            .cloned().collect();
+                        unacked.retain(|u| u.delivery_tag > tx_ack.delivery_tag);
+                        items
+                    } else if let Some(pos) = unacked.iter().position(|u| u.delivery_tag == tx_ack.delivery_tag) {
+                        vec![unacked.remove(pos)]
                     } else {
-                        // Ack
-                        let mut unacked = self.shared.unacked.lock();
-                        if tx_ack.multiple {
-                            let to_ack: Vec<_> = unacked.iter()
-                                .filter(|u| u.delivery_tag <= tx_ack.delivery_tag)
-                                .cloned().collect();
-                            let count = to_ack.len() as u64;
-                            for entry in &to_ack {
-                                if let Some(queue) = self.vhost.get_queue(&entry.queue_name) {
-                                    let _ = queue.ack(&entry.segment_position);
-                                }
+                        vec![]
+                    };
+                    drop(unacked);
+
+                    let count = to_process.len() as u64;
+                    for entry in to_process {
+                        if let Some(queue) = self.vhost.get_queue(&entry.queue_name) {
+                            if tx_ack.nack && tx_ack.requeue {
+                                queue.requeue(entry.segment_position);
+                            } else if let Err(e) = queue.ack(&entry.segment_position) {
+                                tx_errors.push(format!("ack in '{}': {e}", entry.queue_name));
                             }
-                            unacked.retain(|u| u.delivery_tag > tx_ack.delivery_tag);
-                            drop(unacked);
-                            if count > 0 {
-                                self.shared.unacked_count.fetch_sub(count, Ordering::Relaxed);
-                                self.shared.ack_notify.notify_waiters();
-                            }
-                        } else if let Some(pos) = unacked.iter().position(|u| u.delivery_tag == tx_ack.delivery_tag) {
-                            let entry = unacked.remove(pos);
-                            drop(unacked);
-                            if let Some(queue) = self.vhost.get_queue(&entry.queue_name) {
-                                let _ = queue.ack(&entry.segment_position);
-                            }
-                            self.shared.unacked_count.fetch_sub(1, Ordering::Relaxed);
-                            self.shared.ack_notify.notify_waiters();
                         }
                     }
+                    if count > 0 {
+                        self.shared.unacked_count.fetch_sub(count, Ordering::Relaxed);
+                        self.shared.ack_notify.notify_waiters();
+                    }
+                }
+
+                // If any operation failed, close the channel with an error
+                if !tx_errors.is_empty() {
+                    let msg = format!("tx.commit failed: {}", tx_errors.join("; "));
+                    self.close_channel(
+                        ReplyCode::InternalError as u16,
+                        &msg,
+                        CLASS_TX,
+                        METHOD_TX_COMMIT,
+                    )?;
+                    return Ok(());
                 }
 
                 self.send(MethodFrame::TxCommitOk)?;
@@ -996,6 +981,15 @@ impl ServerChannel {
 
 impl Drop for ServerChannel {
     fn drop(&mut self) {
+        // Requeue all unacked messages so they become available to other consumers.
+        // This is critical for at-least-once delivery guarantee.
+        let unacked: Vec<Unacked> = self.shared.unacked.lock().drain(..).collect();
+        for entry in unacked {
+            if let Some(queue) = self.vhost.get_queue(&entry.queue_name) {
+                queue.requeue(entry.segment_position);
+            }
+        }
+
         // Cancel all consumers
         for (_, mut consumer) in self.consumers.drain() {
             if let Some(task) = consumer.task.take() {

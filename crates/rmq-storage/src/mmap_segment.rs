@@ -57,6 +57,7 @@ impl MmapSegment {
     }
 
     /// Append data to the segment. Returns the position where data was written.
+    /// Note: does NOT fsync. Call `flush()` or `flush_async()` to ensure durability.
     pub fn append(&mut self, data: &[u8]) -> io::Result<u32> {
         if self.size + data.len() > self.capacity {
             return Err(io::Error::new(
@@ -67,6 +68,14 @@ impl MmapSegment {
         let pos = self.size as u32;
         self.mmap[self.size..self.size + data.len()].copy_from_slice(data);
         self.size += data.len();
+        Ok(pos)
+    }
+
+    /// Append data and immediately flush to disk (synchronous msync).
+    /// Use for durable messages where persistence must be guaranteed before ack.
+    pub fn append_durable(&mut self, data: &[u8]) -> io::Result<u32> {
+        let pos = self.append(data)?;
+        self.flush()?;
         Ok(pos)
     }
 
