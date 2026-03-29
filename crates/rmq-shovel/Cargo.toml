@@ -7,6 +7,7 @@ edition.workspace = true
 rmq-broker = { workspace = true }
 rmq-protocol = { workspace = true }
 rmq-storage = { workspace = true }
+bytes = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }

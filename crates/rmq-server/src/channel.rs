@@ -481,7 +481,7 @@ impl ServerChannel {
 
                                     let body = AMQPFrame {
                                         channel: channel_id,
-                                        payload: FramePayload::Body(Bytes::from(msg.body)),
+                                        payload: FramePayload::Body(msg.body),
                                     };
 
                                     if tx.send(deliver).is_err()
@@ -707,7 +707,7 @@ impl ServerChannel {
 
                         let body = AMQPFrame {
                             channel: self.id,
-                            payload: FramePayload::Body(Bytes::from(msg.body)),
+                            payload: FramePayload::Body(msg.body),
                         };
                         self.tx.send(body)?;
 
@@ -920,7 +920,7 @@ impl ServerChannel {
             exchange: state.exchange.clone(),
             routing_key: state.routing_key.clone(),
             properties,
-            body: state.body,
+            body: Bytes::from(state.body),
         };
 
         // In transaction mode, buffer the publish

@@ -122,6 +122,7 @@ impl PriorityQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use rmq_protocol::properties::BasicProperties;
     use tempfile::TempDir;
 
@@ -134,7 +135,7 @@ mod tests {
                 priority,
                 ..Default::default()
             },
-            body: body.as_bytes().to_vec(),
+            body: Bytes::from(body.as_bytes().to_vec()),
         }
     }
 
@@ -160,16 +161,16 @@ mod tests {
 
         // Should come out highest priority first
         let (env, _) = pq.shift().unwrap();
-        assert_eq!(env.unwrap().message.body, b"high");
+        assert_eq!(&env.unwrap().message.body[..], b"high");
 
         let (env, _) = pq.shift().unwrap();
-        assert_eq!(env.unwrap().message.body, b"medium");
+        assert_eq!(&env.unwrap().message.body[..], b"medium");
 
         let (env, _) = pq.shift().unwrap();
-        assert_eq!(env.unwrap().message.body, b"low");
+        assert_eq!(&env.unwrap().message.body[..], b"low");
 
         let (env, _) = pq.shift().unwrap();
-        assert_eq!(env.unwrap().message.body, b"default");
+        assert_eq!(&env.unwrap().message.body[..], b"default");
 
         let (env, _) = pq.shift().unwrap();
         assert!(env.is_none());
@@ -193,9 +194,9 @@ mod tests {
 
         // Both should be at priority 3, so FIFO within same priority
         let (env, _) = pq.shift().unwrap();
-        assert_eq!(env.unwrap().message.body, b"clamped");
+        assert_eq!(&env.unwrap().message.body[..], b"clamped");
         let (env, _) = pq.shift().unwrap();
-        assert_eq!(env.unwrap().message.body, b"at-max");
+        assert_eq!(&env.unwrap().message.body[..], b"at-max");
     }
 
     #[test]
@@ -236,10 +237,10 @@ mod tests {
         pq.publish(&make_msg("third", Some(3))).unwrap();
 
         let (env, _) = pq.shift().unwrap();
-        assert_eq!(env.unwrap().message.body, b"first");
+        assert_eq!(&env.unwrap().message.body[..], b"first");
         let (env, _) = pq.shift().unwrap();
-        assert_eq!(env.unwrap().message.body, b"second");
+        assert_eq!(&env.unwrap().message.body[..], b"second");
         let (env, _) = pq.shift().unwrap();
-        assert_eq!(env.unwrap().message.body, b"third");
+        assert_eq!(&env.unwrap().message.body[..], b"third");
     }
 }

@@ -201,7 +201,7 @@ impl MqttBroker {
                 content_type: Some("application/octet-stream".into()),
                 ..Default::default()
             },
-            body: publish.payload.to_vec(),
+            body: publish.payload.clone(),
         };
 
         let _ = self.vhost.publish(MQTT_EXCHANGE, &amqp_routing_key, &msg);

@@ -434,6 +434,7 @@ fn now_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use rmq_protocol::properties::BasicProperties;
     use tempfile::TempDir;
 
@@ -461,7 +462,7 @@ mod tests {
             exchange: "".into(),
             routing_key: "test".into(),
             properties: BasicProperties::default(),
-            body: body.as_bytes().to_vec(),
+            body: Bytes::from(body.as_bytes().to_vec()),
         }
     }
 
@@ -476,9 +477,9 @@ mod tests {
         assert!(matches!(result, PublishResult::Accepted(_)));
 
         let (env, _) = queue.shift().unwrap();
-        assert_eq!(env.unwrap().message.body, b"hello");
+        assert_eq!(&env.unwrap().message.body[..], b"hello");
         let (env, _) = queue.shift().unwrap();
-        assert_eq!(env.unwrap().message.body, b"world");
+        assert_eq!(&env.unwrap().message.body[..], b"world");
     }
 
     #[test]
@@ -534,9 +535,9 @@ mod tests {
 
         // "first" should have been dropped
         let (env, _) = queue.shift().unwrap();
-        assert_eq!(env.unwrap().message.body, b"second");
+        assert_eq!(&env.unwrap().message.body[..], b"second");
         let (env, _) = queue.shift().unwrap();
-        assert_eq!(env.unwrap().message.body, b"third");
+        assert_eq!(&env.unwrap().message.body[..], b"third");
         let (env, _) = queue.shift().unwrap();
         assert!(env.is_none());
     }
@@ -569,7 +570,7 @@ mod tests {
         assert_eq!(dead_letters.len(), 1);
         assert_eq!(dead_letters[0].exchange, "dlx");
         assert_eq!(dead_letters[0].routing_key, "dead");
-        assert_eq!(dead_letters[0].message.body, b"first");
+        assert_eq!(&dead_letters[0].message.body[..], b"first");
     }
 
     #[test]
@@ -596,7 +597,7 @@ mod tests {
         queue.publish(&msg).unwrap();
 
         let (env, _) = queue.shift().unwrap();
-        assert_eq!(env.unwrap().message.body, b"alive");
+        assert_eq!(&env.unwrap().message.body[..], b"alive");
     }
 
     #[test]
@@ -643,11 +644,11 @@ mod tests {
 
         let (batch, _) = queue.shift_batch(5).unwrap();
         assert_eq!(batch.len(), 5);
-        assert_eq!(batch[0].message.body, b"msg-0");
-        assert_eq!(batch[4].message.body, b"msg-4");
+        assert_eq!(&batch[0].message.body[..], b"msg-0");
+        assert_eq!(&batch[4].message.body[..], b"msg-4");
 
         let (batch2, _) = queue.shift_batch(10).unwrap();
         assert_eq!(batch2.len(), 5);
-        assert_eq!(batch2[0].message.body, b"msg-5");
+        assert_eq!(&batch2[0].message.body[..], b"msg-5");
     }
 }

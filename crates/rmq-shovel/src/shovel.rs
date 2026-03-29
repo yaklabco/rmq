@@ -132,7 +132,7 @@ pub async fn run_shovel(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rmq_broker::exchange::ExchangeConfig;
+    use bytes::Bytes;
     use rmq_broker::queue::QueueConfig;
     use rmq_protocol::field_table::FieldTable;
     use tempfile::TempDir;
@@ -148,7 +148,7 @@ mod tests {
             exchange: "".into(),
             routing_key: "src-key".into(),
             properties: BasicProperties::default(),
-            body: body.as_bytes().to_vec(),
+            body: Bytes::from(body.as_bytes().to_vec()),
         }
     }
 
@@ -208,7 +208,7 @@ mod tests {
         // Verify dest queue has messages
         let dest = vhost.get_queue("dest-queue").unwrap();
         let (env, _) = dest.shift().unwrap();
-        assert_eq!(env.unwrap().message.body, b"msg-0");
+        assert_eq!(&env.unwrap().message.body[..], b"msg-0");
     }
 
     #[tokio::test]

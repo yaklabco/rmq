@@ -475,7 +475,7 @@ fn decode_message(data: &[u8]) -> io::Result<StoredMessage> {
             "body truncated",
         ));
     }
-    let body = buf.split_to(bodysize).to_vec();
+    let body = buf.split_to(bodysize);
 
     Ok(StoredMessage {
         timestamp,
@@ -539,6 +539,7 @@ fn peek_message_size(data: &[u8]) -> io::Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use tempfile::TempDir;
 
     fn test_message(body: &str) -> StoredMessage {
@@ -550,7 +551,7 @@ mod tests {
                 delivery_mode: Some(2),
                 ..Default::default()
             },
-            body: body.as_bytes().to_vec(),
+            body: Bytes::from(body.as_bytes().to_vec()),
         }
     }
 
@@ -565,7 +566,7 @@ mod tests {
         let read_msg = store.read_at(&sp).unwrap();
         assert_eq!(read_msg.exchange, "amq.direct");
         assert_eq!(read_msg.routing_key, "test-key");
-        assert_eq!(read_msg.body, b"hello world");
+        assert_eq!(&read_msg.body[..], b"hello world");
         assert_eq!(read_msg.timestamp, 1234567890);
     }
 
@@ -579,14 +580,14 @@ mod tests {
         store.push(&test_message("third")).unwrap();
 
         let env1 = store.shift().unwrap().unwrap();
-        assert_eq!(env1.message.body, b"first");
+        assert_eq!(&env1.message.body[..], b"first");
         assert!(!env1.redelivered);
 
         let env2 = store.shift().unwrap().unwrap();
-        assert_eq!(env2.message.body, b"second");
+        assert_eq!(&env2.message.body[..], b"second");
 
         let env3 = store.shift().unwrap().unwrap();
-        assert_eq!(env3.message.body, b"third");
+        assert_eq!(&env3.message.body[..], b"third");
 
         assert!(store.shift().unwrap().is_none());
     }
@@ -604,7 +605,7 @@ mod tests {
 
         // Shift should skip the acked message
         let env = store.shift().unwrap().unwrap();
-        assert_eq!(env.message.body, b"second");
+        assert_eq!(&env.message.body[..], b"second");
     }
 
     #[test]
@@ -617,14 +618,14 @@ mod tests {
 
         // Consume first
         let env = store.shift().unwrap().unwrap();
-        assert_eq!(env.message.body, b"first");
+        assert_eq!(&env.message.body[..], b"first");
 
         // Requeue it
         store.requeue(sp1);
 
         // Next shift should return requeued message
         let env = store.shift().unwrap().unwrap();
-        assert_eq!(env.message.body, b"first");
+        assert_eq!(&env.message.body[..], b"first");
         assert!(env.redelivered);
     }
 
@@ -688,10 +689,10 @@ mod tests {
             assert_eq!(store.message_count(), 2);
 
             let env = store.shift().unwrap().unwrap();
-            assert_eq!(env.message.body, b"persistent-1");
+            assert_eq!(&env.message.body[..], b"persistent-1");
 
             let env = store.shift().unwrap().unwrap();
-            assert_eq!(env.message.body, b"persistent-2");
+            assert_eq!(&env.message.body[..], b"persistent-2");
         }
     }
 }

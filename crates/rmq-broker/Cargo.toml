@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 rmq-protocol = { workspace = true }
 rmq-storage = { workspace = true }
+bytes = { workspace = true }
 parking_lot = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

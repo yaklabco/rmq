@@ -149,6 +149,7 @@ fn increment_hop_count(msg: &mut StoredMessage) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use rmq_broker::queue::QueueConfig;
     use rmq_protocol::field_table::FieldTable;
     use tempfile::TempDir;
@@ -184,7 +185,7 @@ mod tests {
                 exchange: "".into(),
                 routing_key: "fed-key".into(),
                 properties: BasicProperties::default(),
-                body: format!("fed-{i}").into_bytes(),
+                body: Bytes::from(format!("fed-{i}")),
             };
             src.publish(&msg).unwrap();
         }
@@ -214,7 +215,7 @@ mod tests {
         let dest = vhost.get_queue("fed-dest").unwrap();
         let (env, _) = dest.shift().unwrap();
         let msg = env.unwrap().message;
-        assert_eq!(msg.body, b"fed-0");
+        assert_eq!(&msg.body[..], b"fed-0");
         let hops = get_hop_count(&msg);
         assert_eq!(hops, 1);
     }
@@ -237,7 +238,7 @@ mod tests {
             exchange: "".into(),
             routing_key: "key".into(),
             properties: BasicProperties::default(),
-            body: b"looped".to_vec(),
+            body: Bytes::from_static(b"looped"),
         };
         increment_hop_count(&mut msg);
         increment_hop_count(&mut msg); // hops = 2

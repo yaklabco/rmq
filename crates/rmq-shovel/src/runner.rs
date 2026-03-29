@@ -112,6 +112,7 @@ impl ShovelRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use rmq_broker::queue::QueueConfig;
     use rmq_protocol::field_table::FieldTable;
     use rmq_protocol::properties::BasicProperties;
@@ -163,7 +164,7 @@ mod tests {
             exchange: "".into(),
             routing_key: "r-key".into(),
             properties: BasicProperties::default(),
-            body: b"runner-msg".to_vec(),
+            body: Bytes::from_static(b"runner-msg"),
         }).unwrap();
 
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -175,6 +176,6 @@ mod tests {
         // Verify message was forwarded
         let dest = vhost.get_queue("r-dest").unwrap();
         let (env, _) = dest.shift().unwrap();
-        assert_eq!(env.unwrap().message.body, b"runner-msg");
+        assert_eq!(&env.unwrap().message.body[..], b"runner-msg");
     }
 }

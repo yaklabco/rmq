@@ -355,6 +355,7 @@ pub enum VHostError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use rmq_protocol::properties::BasicProperties;
     use tempfile::TempDir;
 
@@ -364,7 +365,7 @@ mod tests {
             exchange: "amq.direct".into(),
             routing_key: "test".into(),
             properties: BasicProperties::default(),
-            body: body.as_bytes().to_vec(),
+            body: Bytes::from(body.as_bytes().to_vec()),
         }
     }
 
@@ -420,7 +421,7 @@ mod tests {
 
         let queue = vhost.get_queue("my-queue").unwrap();
         let env = queue.shift().unwrap().0.unwrap();
-        assert_eq!(env.message.body, b"hello");
+        assert_eq!(&env.message.body[..], b"hello");
     }
 
     #[test]
@@ -449,7 +450,7 @@ mod tests {
 
         let queue = vhost.get_queue("q1").unwrap();
         let env = queue.shift().unwrap().0.unwrap();
-        assert_eq!(env.message.body, b"routed");
+        assert_eq!(&env.message.body[..], b"routed");
     }
 
     #[test]
@@ -480,7 +481,7 @@ mod tests {
         for name in &["q1", "q2", "q3"] {
             let queue = vhost.get_queue(*name).unwrap();
             let env = queue.shift().unwrap().0.unwrap();
-            assert_eq!(env.message.body, b"broadcast");
+            assert_eq!(&env.message.body[..], b"broadcast");
         }
     }
 

@@ -1,6 +1,8 @@
+use bytes::Bytes;
 use rmq_protocol::properties::BasicProperties;
 
 /// A stored message with all metadata.
+/// Uses reference-counted types for cheap cloning on the delivery fast-path.
 #[derive(Debug, Clone)]
 pub struct StoredMessage {
     /// Unix timestamp when the message was stored.
@@ -11,8 +13,8 @@ pub struct StoredMessage {
     pub routing_key: String,
     /// AMQP message properties.
     pub properties: BasicProperties,
-    /// Message body.
-    pub body: Vec<u8>,
+    /// Message body. Uses Bytes for zero-copy sharing between publisher and consumer.
+    pub body: Bytes,
 }
 
 impl StoredMessage {
