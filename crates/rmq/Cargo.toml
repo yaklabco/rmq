@@ -1,0 +1,20 @@
+[package]
+name = "rmq"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "rmq"
+path = "src/main.rs"
+
+[dependencies]
+rmq-server = { workspace = true }
+rmq-broker = { workspace = true }
+rmq-auth = { workspace = true }
+rmq-mgmt = { workspace = true }
+rmq-mqtt = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = "1"

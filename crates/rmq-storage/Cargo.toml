@@ -1,0 +1,15 @@
+[package]
+name = "rmq-storage"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rmq-protocol = { workspace = true }
+bytes = { workspace = true }
+memmap2 = { workspace = true }
+parking_lot = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

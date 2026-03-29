@@ -1,0 +1,29 @@
+[package]
+name = "rmq-server"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rmq-protocol = { workspace = true }
+rmq-broker = { workspace = true }
+rmq-storage = { workspace = true }
+rmq-auth = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+bytes = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+
+[dev-dependencies]
+lapin = { workspace = true }
+tempfile = "3"
+futures-lite = "2"
+rmq-auth = { workspace = true }
+rcgen = "0.13"
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
