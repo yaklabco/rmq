@@ -39,6 +39,10 @@ struct Cli {
     #[arg(long, default_value = "0.0.0.0:1883")]
     mqtt_bind: SocketAddr,
 
+    /// Native protocol listen address.
+    #[arg(long, default_value = "0.0.0.0:5680")]
+    native_bind: SocketAddr,
+
     /// HTTP management API listen address.
     #[arg(long, default_value = "0.0.0.0:15672")]
     mgmt_bind: SocketAddr,
@@ -101,6 +105,16 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(async move {
         if let Err(e) = rmq_mqtt::listener::run(mqtt_bind, mqtt_broker).await {
             tracing::error!("MQTT listener error: {e}");
+        }
+    });
+
+    // Start native protocol listener
+    let native_vhost = vhost.clone();
+    let native_users = user_store.clone();
+    let native_bind = cli.native_bind;
+    tokio::spawn(async move {
+        if let Err(e) = rmq_native::server::run(native_bind, native_vhost, native_users).await {
+            tracing::error!("native protocol error: {e}");
         }
     });
 

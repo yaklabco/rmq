@@ -84,6 +84,24 @@ enum Command {
         #[arg(short, long, default_value = "100")]
         prefetch: u16,
     },
+    /// Native protocol batch throughput test
+    Native {
+        /// Native protocol address
+        #[arg(long, default_value = "127.0.0.1:5680")]
+        addr: String,
+        /// Total messages
+        #[arg(short = 'n', long, default_value = "1000000")]
+        count: u64,
+        /// Message body size
+        #[arg(short, long, default_value = "128")]
+        size: usize,
+        /// Messages per publish batch
+        #[arg(long, default_value = "1000")]
+        batch: u32,
+        /// Number of parallel connections
+        #[arg(long, default_value = "4")]
+        connections: u32,
+    },
     /// Sharded throughput: N independent queue pairs in parallel
     Sharded {
         /// Total messages across all shards
@@ -145,6 +163,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             prefetch,
         } => {
             run_throughput(&cli.uri, count, size, publishers, consumers, prefetch).await?;
+        }
+        Command::Native {
+            addr,
+            count,
+            size,
+            batch,
+            connections,
+        } => {
+            run_native(&addr, count, size, batch, connections).await?;
         }
         Command::Sharded {
             count,
@@ -691,6 +718,93 @@ async fn run_sharded(
         (total_con as f64 * size as f64) / elapsed.as_secs_f64() / 1_000_000.0,
     );
     println!("  Per-shard:  {:.0} msg/s", con_rate / shards as f64);
+
+    Ok(())
+}
+
+async fn run_native(
+    addr: &str,
+    count: u64,
+    size: usize,
+    batch: u32,
+    connections: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let per_conn = count / connections as u64;
+    let body = vec![b'x'; size];
+
+    println!(
+        "Native protocol: {} msgs x {}B, batch={}, {} connections",
+        count, size, batch, connections
+    );
+
+    let published = Arc::new(AtomicU64::new(0));
+    let start = Instant::now();
+
+    let mut handles = Vec::new();
+    for i in 0..connections {
+        let addr = addr.to_string();
+        let body = body.clone();
+        let published = published.clone();
+        let queue = format!("native-{i}");
+
+        handles.push(tokio::spawn(async move {
+            let mut client =
+                rmq_native::client::NativeClient::connect(&addr, "guest", "guest")
+                    .await
+                    .unwrap();
+
+            let mut remaining = per_conn;
+            while remaining > 0 {
+                let this_batch = remaining.min(batch as u64) as usize;
+                let messages: Vec<bytes::Bytes> = (0..this_batch)
+                    .map(|_| bytes::Bytes::copy_from_slice(&body))
+                    .collect();
+                let confirmed = client
+                    .publish_batch(&queue, messages)
+                    .await
+                    .unwrap();
+                published.fetch_add(confirmed as u64, Ordering::Relaxed);
+                remaining -= this_batch as u64;
+            }
+
+            client.disconnect().await.unwrap();
+        }));
+    }
+
+    // Progress
+    let pub_c = published.clone();
+    let reporter = tokio::spawn(async move {
+        let mut last = 0u64;
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let p = pub_c.load(Ordering::Relaxed);
+            let rate = p - last;
+            eprint!("\r  published: {} ({}/s)    ", p, rate);
+            last = p;
+            if p >= count {
+                break;
+            }
+        }
+    });
+
+    for h in handles {
+        h.await?;
+    }
+    reporter.abort();
+
+    let elapsed = start.elapsed();
+    let total = published.load(Ordering::Relaxed);
+    let rate = total as f64 / elapsed.as_secs_f64();
+
+    println!("\r                                              ");
+    println!("Results (native protocol):");
+    println!("  Messages:  {total}");
+    println!("  Time:      {:.2}s", elapsed.as_secs_f64());
+    println!("  Rate:      {:.0} msg/s", rate);
+    println!(
+        "  Throughput: {:.1} MB/s",
+        (total as f64 * size as f64) / elapsed.as_secs_f64() / 1_000_000.0
+    );
 
     Ok(())
 }

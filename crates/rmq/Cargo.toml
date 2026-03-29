@@ -13,6 +13,7 @@ rmq-broker = { workspace = true }
 rmq-auth = { workspace = true }
 rmq-mgmt = { workspace = true }
 rmq-mqtt = { workspace = true }
+rmq-native = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }

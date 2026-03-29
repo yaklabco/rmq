@@ -2112,6 +2112,7 @@ dependencies = [
  "rmq-broker",
  "rmq-mgmt",
  "rmq-mqtt",
+ "rmq-native",
  "rmq-server",
  "tokio",
  "tracing",
@@ -2202,12 +2203,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "rmq-native"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "parking_lot",
+ "rmq-auth",
+ "rmq-broker",
+ "rmq-protocol",
+ "rmq-storage",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "rmq-perf"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "clap",
  "futures-lite 2.6.1",
  "lapin",
+ "rmq-native",
  "tokio",
  "tracing",
  "tracing-subscriber",

@@ -10,6 +10,7 @@ members = [
     "crates/rmq-mqtt",
     "crates/rmq-shovel",
     "crates/rmq-cluster",
+    "crates/rmq-native",
     "crates/rmq-perf",
     "crates/rmq",
 ]
@@ -64,3 +65,4 @@ rmq-mgmt = { path = "crates/rmq-mgmt" }
 rmq-mqtt = { path = "crates/rmq-mqtt" }
 rmq-shovel = { path = "crates/rmq-shovel" }
 rmq-cluster = { path = "crates/rmq-cluster" }
+rmq-native = { path = "crates/rmq-native" }
