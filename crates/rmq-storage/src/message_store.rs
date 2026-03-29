@@ -21,6 +21,28 @@ pub struct Envelope {
     pub redelivered: bool,
 }
 
+/// Per-segment index of message positions for fast skip-over-acked scanning.
+/// Stores (byte_offset, byte_size) for each message in the segment.
+struct SegmentIndex {
+    /// Sorted list of (position, bytesize) for every message in the segment.
+    entries: Vec<(u32, u32)>,
+}
+
+impl SegmentIndex {
+    fn new() -> Self {
+        Self { entries: Vec::new() }
+    }
+
+    fn push(&mut self, position: u32, bytesize: u32) {
+        self.entries.push((position, bytesize));
+    }
+
+    /// Find the index of the first entry at or after `position`.
+    fn find_from(&self, position: u32) -> usize {
+        self.entries.partition_point(|(pos, _)| *pos < position)
+    }
+}
+
 /// Persistent message store using memory-mapped segment files.
 pub struct MessageStore {
     dir: PathBuf,
@@ -35,6 +57,9 @@ pub struct MessageStore {
 
     /// Per-segment ack tracking.
     ack_stores: BTreeMap<u32, AckStore>,
+
+    /// Per-segment message position index for fast scanning.
+    segment_indices: BTreeMap<u32, SegmentIndex>,
 
     /// Current read position.
     read_segment_id: u32,
@@ -61,6 +86,7 @@ impl MessageStore {
             write_segment_id: 1,
             read_segments: BTreeMap::new(),
             ack_stores: BTreeMap::new(),
+            segment_indices: BTreeMap::new(),
             read_segment_id: 1,
             read_position: 0,
             requeued: RequeuedStore::new(),
@@ -114,6 +140,12 @@ impl MessageStore {
         let sp = SegmentPosition::new(self.write_segment_id, position, bytesize);
         self.message_count += 1;
         self.byte_size += bytesize as u64;
+
+        // Add to segment index for fast skip-over-acked scanning
+        self.segment_indices
+            .entry(self.write_segment_id)
+            .or_insert_with(SegmentIndex::new)
+            .push(position, bytesize);
 
         Ok(sp)
     }
@@ -271,11 +303,49 @@ impl MessageStore {
 
     fn next_from_segments(&mut self) -> io::Result<Option<Envelope>> {
         loop {
-            // Ensure segment is loaded
             let read_seg_id = self.read_segment_id;
             let read_pos = self.read_position;
 
-            // Get segment size, loading if necessary
+            // Fast path: use segment index to skip acked messages without
+            // touching the mmap data at all
+            if let Some(index) = self.segment_indices.get(&read_seg_id) {
+                let start_idx = index.find_from(read_pos);
+                let mut found = false;
+
+                for &(pos, bytesize) in &index.entries[start_idx..] {
+                    if self.is_acked(read_seg_id, pos) {
+                        // Skip without reading mmap — just advance past it
+                        self.read_position = pos + bytesize;
+                        continue;
+                    }
+
+                    // Found un-acked message — read its data
+                    let data = self.read_segment_data(read_seg_id, pos, bytesize as usize)?;
+                    let data = match data {
+                        Some(d) => d,
+                        None => break,
+                    };
+
+                    let message = decode_message(&data)?;
+                    self.read_position = pos + bytesize;
+
+                    return Ok(Some(Envelope {
+                        segment_position: SegmentPosition::new(read_seg_id, pos, bytesize),
+                        message,
+                        redelivered: false,
+                    }));
+                }
+
+                // Exhausted this segment's index — move to next
+                if self.read_segment_id < self.write_segment_id {
+                    self.read_segment_id += 1;
+                    self.read_position = 0;
+                    continue;
+                }
+                return Ok(None);
+            }
+
+            // Slow path: no index (old segments from before indexing, or recovery)
             let seg_size = self.ensure_read_segment(read_seg_id)?;
             let seg_size = match seg_size {
                 Some(s) => s,
@@ -301,7 +371,6 @@ impl MessageStore {
                 return Ok(None);
             }
 
-            // Copy segment data to avoid borrow issues
             let data = self.read_segment_data(read_seg_id, read_pos, remaining)?;
             let data = match data {
                 Some(d) => d,
@@ -315,13 +384,13 @@ impl MessageStore {
 
             let sp = SegmentPosition::new(read_seg_id, read_pos, msg_size as u32);
 
-            // Skip acked messages
             if self.is_acked(sp.segment, sp.position) {
                 self.read_position += sp.bytesize;
                 continue;
             }
 
             let message = decode_message(&data[..msg_size])?;
+            self.read_position = read_pos + msg_size as u32;
 
             return Ok(Some(Envelope {
                 segment_position: sp,
@@ -407,11 +476,12 @@ impl MessageStore {
         let seg = MmapSegment::open_read(&write_path, metadata.len() as usize)?;
         self.write_segment = Some(seg);
 
-        // Count messages (scan all segments)
+        // Count messages and build segment indices (scan all segments)
         for &id in &segment_ids {
             let seg_path = self.segment_path(id);
             let data = fs::read(&seg_path)?;
             let mut offset = 0usize;
+            let mut index = SegmentIndex::new();
             while offset < data.len() {
                 let remaining = &data[offset..];
                 if remaining.len() < StoredMessage::MIN_BYTESIZE {
@@ -421,12 +491,14 @@ impl MessageStore {
                 if msg_size == 0 || msg_size > remaining.len() {
                     break;
                 }
+                index.push(offset as u32, msg_size as u32);
                 if !self.is_acked(id, offset as u32) {
                     self.message_count += 1;
                     self.byte_size += msg_size as u64;
                 }
                 offset += msg_size;
             }
+            self.segment_indices.insert(id, index);
         }
 
         Ok(())
