@@ -31,6 +31,12 @@ impl MmapSegment {
 
         let mmap = unsafe { MmapMut::map_mut(&file)? };
 
+        // Hint the kernel for sequential write access
+        #[cfg(unix)]
+        {
+            let _ = mmap.advise(memmap2::Advice::Sequential);
+        }
+
         Ok(Self {
             path,
             mmap,
@@ -122,6 +128,14 @@ impl MmapSegment {
     /// Flush changes to disk (sync msync).
     pub fn flush(&self) -> io::Result<()> {
         self.mmap.flush()
+    }
+
+    /// Advise the kernel that we're done with this region (for read segments
+    /// that have been fully consumed). Frees page cache.
+    #[cfg(unix)]
+    pub fn advise_dontneed(&self) -> io::Result<()> {
+        unsafe { self.mmap.unchecked_advise(memmap2::UncheckedAdvice::DontNeed)?; }
+        Ok(())
     }
 
     /// Truncate the file to the actual data size (on close).
