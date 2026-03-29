@@ -95,29 +95,20 @@ impl Queue {
 
         let (fast_tx, fast_rx) = tokio::sync::mpsc::channel(FAST_PATH_CAPACITY);
 
-        // Load existing messages from store into the channel (recovery path)
-        // This runs synchronously at startup only.
+        // On startup, existing messages are in the mmap store. Consumers will
+        // read them via the store fallback path (no need to pre-populate the
+        // channel — the channel is for new messages from live publishers).
         {
-            let mut store_guard = store;
-            let mut recovered = 0u32;
-            loop {
-                match store_guard.shift() {
-                    Ok(Some(env)) => {
-                        if fast_tx.try_send(env).is_err() {
-                            break; // channel full
-                        }
-                        recovered += 1;
-                    }
-                    _ => break,
-                }
+            let msg_count = store.message_count();
+            if msg_count > 0 {
+                tracing::debug!(
+                    "queue '{}': {} messages available in store for recovery",
+                    config.name, msg_count
+                );
             }
-            if recovered > 0 {
-                tracing::debug!("queue '{}': recovered {recovered} messages from store", config.name);
-            }
-            // Put store back
             let queue = Self {
                 config,
-                store: Mutex::new(store_guard),
+                store: Mutex::new(store),
                 consumer_count: AtomicU64::new(0),
                 publish_notify: Notify::new(),
                 fast_tx,
@@ -224,12 +215,13 @@ impl Queue {
             }
         }
 
-        // Also shift from store so it doesn't re-deliver this message on recovery
-        // (the channel is the delivery mechanism, store is for durability only)
-        let _ = store.shift();
         drop(store);
 
-        // Push to fast-path channel
+        // Push to fast-path channel for immediate consumer delivery.
+        // Messages are in BOTH the store and the channel. When the consumer
+        // reads from the channel, it acks in the store so the store won't
+        // re-deliver. When the channel is full, the consumer falls back to
+        // the store (which has all un-acked messages).
         let envelope = Envelope {
             segment_position: sp,
             message: msg.clone(),
@@ -249,7 +241,9 @@ impl Queue {
     }
 
     /// Consume the next message. Checks fast-path channel first, then falls
-    /// back to the store (which contains requeued messages and overflow).
+    /// back to the store (which has requeued messages and overflow).
+    /// When reading from the channel, marks the message as "delivered" in the
+    /// store so the store fallback won't re-deliver it.
     pub fn shift(&self) -> std::io::Result<(Option<Envelope>, Vec<DeadLetter>)> {
         let now = now_millis();
 
@@ -264,10 +258,15 @@ impl Queue {
                 };
                 return Ok((None, dl));
             }
+            // Mark as delivered in the store so the store fallback won't
+            // re-deliver this message. The consumer still tracks it as
+            // unacked — if the consumer disconnects, ServerChannel::Drop
+            // requeues it back into the store.
+            self.store.lock().ack(&env.segment_position)?;
             return Ok((Some(env), vec![]));
         }
 
-        // Slow path: check store for requeued messages and channel-overflow messages
+        // Slow path: check store for requeued messages and overflow
         let mut store = self.store.lock();
         let mut dead_letters = Vec::new();
         loop {
@@ -297,22 +296,34 @@ impl Queue {
         let mut dead_letters = Vec::new();
 
         // Phase 1: drain fast-path channel
+        let mut channel_positions = Vec::new();
         {
             let mut rx = self.fast_rx.lock();
             while envelopes.len() < max {
                 match rx.try_recv() {
                     Ok(env) => {
                         if self.is_expired(&env.message, now) {
-                            self.store.lock().ack(&env.segment_position)?;
+                            channel_positions.push(env.segment_position);
                             if self.dead_letter_exchange.is_some() {
                                 dead_letters.push(self.make_dead_letter(env, "expired"));
                             }
                             continue;
                         }
+                        channel_positions.push(env.segment_position);
                         envelopes.push(env);
                     }
                     Err(_) => break,
                 }
+            }
+        }
+
+        // Mark channel-delivered messages as acked in the store so the
+        // store fallback won't re-deliver them. Consumer still tracks
+        // them as unacked in ServerChannel.
+        if !channel_positions.is_empty() {
+            let mut store = self.store.lock();
+            for sp in &channel_positions {
+                store.ack(sp)?;
             }
         }
 
@@ -362,9 +373,9 @@ impl Queue {
     }
 
     pub fn message_count(&self) -> u64 {
-        // Channel length reflects live messages available for delivery.
-        // Store count reflects persisted-but-not-yet-acked (for recovery).
-        self.fast_rx.lock().len() as u64
+        // Store count reflects un-acked messages (including those in-flight
+        // via the channel). This is the authoritative count.
+        self.store.lock().message_count()
     }
 
     pub fn consumer_count(&self) -> u64 {
@@ -382,16 +393,20 @@ impl Queue {
     }
 
     pub fn purge(&self) -> std::io::Result<u32> {
-        // Drain fast-path
-        let mut count = 0u32;
+        // Drain fast-path channel and ack those messages in the store
+        let mut channel_positions = Vec::new();
         {
             let mut rx = self.fast_rx.lock();
-            while rx.try_recv().is_ok() {
-                count += 1;
+            while let Ok(env) = rx.try_recv() {
+                channel_positions.push(env.segment_position);
             }
         }
-        // Drain store
         let mut store = self.store.lock();
+        for sp in &channel_positions {
+            store.ack(sp)?;
+        }
+        let mut count = channel_positions.len() as u32;
+        // Drain remaining from store
         while let Some(env) = store.shift()? {
             store.ack(&env.segment_position)?;
             count += 1;
