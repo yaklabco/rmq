@@ -444,9 +444,12 @@ impl ServerChannel {
                                 }
 
                                 if envelopes.is_empty() {
-                                    // Wait briefly for new messages. Use a short timeout
-                                    // so we periodically retry the store (which may have
-                                    // messages from overflow or requeue).
+                                    // Flush channel-delivered positions to the store so
+                                    // the next shift_batch can scan efficiently
+                                    let _ = queue.flush_channel_delivered();
+
+                                    // Brief wait, then retry (the flush may have unblocked
+                                    // store messages)
                                     tokio::select! {
                                         biased;
                                         _ = queue.wait_for_message() => {}

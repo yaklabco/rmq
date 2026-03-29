@@ -385,6 +385,23 @@ impl Queue {
         Ok(())
     }
 
+    /// Flush all channel_delivered positions to the store's ack set.
+    /// Call this when the channel is empty to prepare the store for
+    /// efficient sequential scanning of remaining overflow messages.
+    pub fn flush_channel_delivered(&self) -> std::io::Result<()> {
+        let positions: Vec<(u32, u32)> = self.channel_delivered.lock().drain().collect();
+        if !positions.is_empty() {
+            let mut store = self.store.lock();
+            for (seg, pos) in &positions {
+                // These may already be acked (from shift_batch Phase 2)
+                // so ignore errors from double-ack
+                let sp = SegmentPosition::new(*seg, *pos, 0);
+                let _ = store.ack(&sp);
+            }
+        }
+        Ok(())
+    }
+
     pub fn peek(&self) -> std::io::Result<Option<Envelope>> {
         self.store.lock().peek()
     }
