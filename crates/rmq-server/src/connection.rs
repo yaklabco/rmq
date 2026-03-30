@@ -122,11 +122,16 @@ impl Connection {
                     None => break,
                 };
                 buf.clear();
-                frame.encode(&mut buf);
+                if let Err(e) = frame.encode(&mut buf) {
+                    error!("encode error: {e}");
+                    continue;
+                }
 
                 // Drain all immediately available frames into the same buffer
                 while let Ok(frame) = rx.try_recv() {
-                    frame.encode(&mut buf);
+                    if let Err(e) = frame.encode(&mut buf) {
+                        error!("encode error: {e}");
+                    }
                 }
 
                 // Single write + flush for the entire batch

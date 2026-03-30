@@ -40,13 +40,14 @@ impl FieldTable {
     }
 
     /// Encode this field table into the buffer (with 4-byte length prefix).
-    pub fn encode(&self, buf: &mut BytesMut) {
+    pub fn encode(&self, buf: &mut BytesMut) -> Result<(), ProtocolError> {
         let size = self.encoded_size();
         buf.put_u32(size);
         for (key, value) in &self.0 {
-            encode_short_string(buf, key);
-            value.encode(buf);
+            encode_short_string(buf, key)?;
+            value.encode(buf)?;
         }
+        Ok(())
     }
 
     /// Decode a field table from the buffer (reads 4-byte length prefix first).
@@ -143,7 +144,7 @@ impl FieldValue {
         }
     }
 
-    pub fn encode(&self, buf: &mut BytesMut) {
+    pub fn encode(&self, buf: &mut BytesMut) -> Result<(), ProtocolError> {
         buf.put_u8(self.type_tag());
         match self {
             FieldValue::Bool(v) => buf.put_u8(if *v { 1 } else { 0 }),
@@ -166,16 +167,20 @@ impl FieldValue {
                 buf.put_slice(b);
             }
             FieldValue::Timestamp(v) => buf.put_u64(*v),
-            FieldValue::FieldTable(t) => t.encode(buf),
+            FieldValue::FieldTable(t) => {
+                t.encode(buf)?;
+                return Ok(());
+            }
             FieldValue::FieldArray(arr) => {
                 let size: u32 = arr.iter().map(|v| v.encoded_size()).sum();
                 buf.put_u32(size);
                 for v in arr {
-                    v.encode(buf);
+                    v.encode(buf)?;
                 }
             }
             FieldValue::Void => {}
         }
+        Ok(())
     }
 
     pub fn decode(buf: &mut Bytes) -> Result<Self, ProtocolError> {
@@ -276,10 +281,16 @@ fn ensure_remaining(buf: &Bytes, needed: usize) -> Result<(), ProtocolError> {
     }
 }
 
-pub fn encode_short_string(buf: &mut BytesMut, s: &str) {
-    debug_assert!(s.len() <= 255);
+pub fn encode_short_string(buf: &mut BytesMut, s: &str) -> Result<(), ProtocolError> {
+    if s.len() > 255 {
+        return Err(ProtocolError::StringTooLong {
+            len: s.len(),
+            max: 255,
+        });
+    }
     buf.put_u8(s.len() as u8);
     buf.put_slice(s.as_bytes());
+    Ok(())
 }
 
 pub fn decode_short_string(buf: &mut Bytes) -> Result<String, ProtocolError> {
@@ -351,7 +362,7 @@ mod tests {
         );
 
         let mut buf = BytesMut::new();
-        table.encode(&mut buf);
+        table.encode(&mut buf).unwrap();
 
         let mut bytes = buf.freeze();
         let decoded = FieldTable::decode(&mut bytes).unwrap();
@@ -361,10 +372,33 @@ mod tests {
     #[test]
     fn test_short_string_round_trip() {
         let mut buf = BytesMut::new();
-        encode_short_string(&mut buf, "test");
+        encode_short_string(&mut buf, "test").unwrap();
         let mut bytes = buf.freeze();
         let decoded = decode_short_string(&mut bytes).unwrap();
         assert_eq!(decoded, "test");
+    }
+
+    #[test]
+    fn test_encode_short_string_too_long() {
+        let long = "x".repeat(256);
+        let mut buf = BytesMut::new();
+        let result = encode_short_string(&mut buf, &long);
+        assert!(matches!(
+            result,
+            Err(ProtocolError::StringTooLong { len: 256, max: 255 })
+        ));
+        // Buffer should be untouched
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn test_encode_short_string_max_length() {
+        let max_str = "a".repeat(255);
+        let mut buf = BytesMut::new();
+        encode_short_string(&mut buf, &max_str).unwrap();
+        let mut bytes = buf.freeze();
+        let decoded = decode_short_string(&mut bytes).unwrap();
+        assert_eq!(decoded, max_str);
     }
 
     #[test]
@@ -381,7 +415,7 @@ mod tests {
     fn test_empty_field_table() {
         let table = FieldTable::new();
         let mut buf = BytesMut::new();
-        table.encode(&mut buf);
+        table.encode(&mut buf).unwrap();
         let mut bytes = buf.freeze();
         let decoded = FieldTable::decode(&mut bytes).unwrap();
         assert!(decoded.is_empty());
@@ -404,7 +438,7 @@ mod tests {
 
         for value in values {
             let mut buf = BytesMut::new();
-            value.encode(&mut buf);
+            value.encode(&mut buf).unwrap();
             let mut bytes = buf.freeze();
             let decoded = FieldValue::decode(&mut bytes).unwrap();
             assert_eq!(value, decoded);

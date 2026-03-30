@@ -339,7 +339,7 @@ pub struct BasicNack {
 // --- Encoding ---
 
 impl AMQPFrame {
-    pub fn encode(&self, buf: &mut BytesMut) {
+    pub fn encode(&self, buf: &mut BytesMut) -> Result<(), ProtocolError> {
         match &self.payload {
             FramePayload::Method(method) => {
                 // Write header with placeholder size, encode in-place, patch size
@@ -348,7 +348,7 @@ impl AMQPFrame {
                 let size_offset = buf.len();
                 buf.put_u32(0); // placeholder
                 let payload_start = buf.len();
-                method.encode(buf);
+                method.encode(buf)?;
                 let payload_len = (buf.len() - payload_start) as u32;
                 // Patch the size field
                 buf[size_offset..size_offset + 4].copy_from_slice(&payload_len.to_be_bytes());
@@ -363,7 +363,7 @@ impl AMQPFrame {
                 buf.put_u16(header.class_id);
                 buf.put_u16(0); // weight
                 buf.put_u64(header.body_size);
-                header.properties.encode(buf);
+                header.properties.encode(buf)?;
                 let payload_len = (buf.len() - payload_start) as u32;
                 buf[size_offset..size_offset + 4].copy_from_slice(&payload_len.to_be_bytes());
                 buf.put_u8(FRAME_END);
@@ -382,6 +382,7 @@ impl AMQPFrame {
                 buf.put_u8(FRAME_END);
             }
         }
+        Ok(())
     }
 
     pub fn decode(buf: &mut Bytes) -> Result<Self, ProtocolError> {
@@ -522,7 +523,7 @@ impl MethodFrame {
         }
     }
 
-    pub fn encode(&self, buf: &mut BytesMut) {
+    pub fn encode(&self, buf: &mut BytesMut) -> Result<(), ProtocolError> {
         let (class_id, method_id) = self.class_method_id();
         buf.put_u16(class_id);
         buf.put_u16(method_id);
@@ -531,15 +532,15 @@ impl MethodFrame {
             Self::ConnectionStart(m) => {
                 buf.put_u8(m.version_major);
                 buf.put_u8(m.version_minor);
-                m.server_properties.encode(buf);
+                m.server_properties.encode(buf)?;
                 encode_long_string(buf, &m.mechanisms);
                 encode_long_string(buf, &m.locales);
             }
             Self::ConnectionStartOk(m) => {
-                m.client_properties.encode(buf);
-                encode_short_string(buf, &m.mechanism);
+                m.client_properties.encode(buf)?;
+                encode_short_string(buf, &m.mechanism)?;
                 encode_long_string(buf, &m.response);
-                encode_short_string(buf, &m.locale);
+                encode_short_string(buf, &m.locale)?;
             }
             Self::ConnectionTune(m) => {
                 buf.put_u16(m.channel_max);
@@ -552,27 +553,27 @@ impl MethodFrame {
                 buf.put_u16(m.heartbeat);
             }
             Self::ConnectionOpen(m) => {
-                encode_short_string(buf, &m.virtual_host);
-                encode_short_string(buf, ""); // reserved (capabilities)
+                encode_short_string(buf, &m.virtual_host)?;
+                encode_short_string(buf, "")?; // reserved (capabilities)
                 buf.put_u8(0); // reserved (insist)
             }
             Self::ConnectionOpenOk => {
-                encode_short_string(buf, ""); // reserved
+                encode_short_string(buf, "")?; // reserved
             }
             Self::ConnectionClose(m) => {
                 buf.put_u16(m.reply_code);
-                encode_short_string(buf, &m.reply_text);
+                encode_short_string(buf, &m.reply_text)?;
                 buf.put_u16(m.class_id);
                 buf.put_u16(m.method_id);
             }
             Self::ConnectionCloseOk => {}
             Self::ConnectionBlocked(m) => {
-                encode_short_string(buf, &m.reason);
+                encode_short_string(buf, &m.reason)?;
             }
             Self::ConnectionUnblocked => {}
 
             Self::ChannelOpen => {
-                encode_short_string(buf, ""); // reserved
+                encode_short_string(buf, "")?; // reserved
             }
             Self::ChannelOpenOk => {
                 encode_long_string(buf, b""); // reserved
@@ -585,7 +586,7 @@ impl MethodFrame {
             }
             Self::ChannelClose(m) => {
                 buf.put_u16(m.reply_code);
-                encode_short_string(buf, &m.reply_text);
+                encode_short_string(buf, &m.reply_text)?;
                 buf.put_u16(m.class_id);
                 buf.put_u16(m.method_id);
             }
@@ -593,8 +594,8 @@ impl MethodFrame {
 
             Self::ExchangeDeclare(m) => {
                 buf.put_u16(0); // reserved (ticket)
-                encode_short_string(buf, &m.exchange);
-                encode_short_string(buf, &m.exchange_type);
+                encode_short_string(buf, &m.exchange)?;
+                encode_short_string(buf, &m.exchange_type)?;
                 let mut bits = 0u8;
                 if m.passive {
                     bits |= 1;
@@ -612,12 +613,12 @@ impl MethodFrame {
                     bits |= 16;
                 }
                 buf.put_u8(bits);
-                m.arguments.encode(buf);
+                m.arguments.encode(buf)?;
             }
             Self::ExchangeDeclareOk => {}
             Self::ExchangeDelete(m) => {
                 buf.put_u16(0); // reserved
-                encode_short_string(buf, &m.exchange);
+                encode_short_string(buf, &m.exchange)?;
                 let mut bits = 0u8;
                 if m.if_unused {
                     bits |= 1;
@@ -630,26 +631,26 @@ impl MethodFrame {
             Self::ExchangeDeleteOk => {}
             Self::ExchangeBind(m) => {
                 buf.put_u16(0); // reserved
-                encode_short_string(buf, &m.destination);
-                encode_short_string(buf, &m.source);
-                encode_short_string(buf, &m.routing_key);
+                encode_short_string(buf, &m.destination)?;
+                encode_short_string(buf, &m.source)?;
+                encode_short_string(buf, &m.routing_key)?;
                 buf.put_u8(if m.no_wait { 1 } else { 0 });
-                m.arguments.encode(buf);
+                m.arguments.encode(buf)?;
             }
             Self::ExchangeBindOk => {}
             Self::ExchangeUnbind(m) => {
                 buf.put_u16(0); // reserved
-                encode_short_string(buf, &m.destination);
-                encode_short_string(buf, &m.source);
-                encode_short_string(buf, &m.routing_key);
+                encode_short_string(buf, &m.destination)?;
+                encode_short_string(buf, &m.source)?;
+                encode_short_string(buf, &m.routing_key)?;
                 buf.put_u8(if m.no_wait { 1 } else { 0 });
-                m.arguments.encode(buf);
+                m.arguments.encode(buf)?;
             }
             Self::ExchangeUnbindOk => {}
 
             Self::QueueDeclare(m) => {
                 buf.put_u16(0); // reserved
-                encode_short_string(buf, &m.queue);
+                encode_short_string(buf, &m.queue)?;
                 let mut bits = 0u8;
                 if m.passive {
                     bits |= 1;
@@ -667,33 +668,33 @@ impl MethodFrame {
                     bits |= 16;
                 }
                 buf.put_u8(bits);
-                m.arguments.encode(buf);
+                m.arguments.encode(buf)?;
             }
             Self::QueueDeclareOk(m) => {
-                encode_short_string(buf, &m.queue);
+                encode_short_string(buf, &m.queue)?;
                 buf.put_u32(m.message_count);
                 buf.put_u32(m.consumer_count);
             }
             Self::QueueBind(m) => {
                 buf.put_u16(0); // reserved
-                encode_short_string(buf, &m.queue);
-                encode_short_string(buf, &m.exchange);
-                encode_short_string(buf, &m.routing_key);
+                encode_short_string(buf, &m.queue)?;
+                encode_short_string(buf, &m.exchange)?;
+                encode_short_string(buf, &m.routing_key)?;
                 buf.put_u8(if m.no_wait { 1 } else { 0 });
-                m.arguments.encode(buf);
+                m.arguments.encode(buf)?;
             }
             Self::QueueBindOk => {}
             Self::QueueUnbind(m) => {
                 buf.put_u16(0); // reserved
-                encode_short_string(buf, &m.queue);
-                encode_short_string(buf, &m.exchange);
-                encode_short_string(buf, &m.routing_key);
-                m.arguments.encode(buf);
+                encode_short_string(buf, &m.queue)?;
+                encode_short_string(buf, &m.exchange)?;
+                encode_short_string(buf, &m.routing_key)?;
+                m.arguments.encode(buf)?;
             }
             Self::QueueUnbindOk => {}
             Self::QueuePurge(m) => {
                 buf.put_u16(0); // reserved
-                encode_short_string(buf, &m.queue);
+                encode_short_string(buf, &m.queue)?;
                 buf.put_u8(if m.no_wait { 1 } else { 0 });
             }
             Self::QueuePurgeOk(count) => {
@@ -701,7 +702,7 @@ impl MethodFrame {
             }
             Self::QueueDelete(m) => {
                 buf.put_u16(0); // reserved
-                encode_short_string(buf, &m.queue);
+                encode_short_string(buf, &m.queue)?;
                 let mut bits = 0u8;
                 if m.if_unused {
                     bits |= 1;
@@ -726,8 +727,8 @@ impl MethodFrame {
             Self::BasicQosOk => {}
             Self::BasicConsume(m) => {
                 buf.put_u16(0); // reserved
-                encode_short_string(buf, &m.queue);
-                encode_short_string(buf, &m.consumer_tag);
+                encode_short_string(buf, &m.queue)?;
+                encode_short_string(buf, &m.consumer_tag)?;
                 let mut bits = 0u8;
                 if m.no_local {
                     bits |= 1;
@@ -742,22 +743,22 @@ impl MethodFrame {
                     bits |= 8;
                 }
                 buf.put_u8(bits);
-                m.arguments.encode(buf);
+                m.arguments.encode(buf)?;
             }
             Self::BasicConsumeOk(tag) => {
-                encode_short_string(buf, tag);
+                encode_short_string(buf, tag)?;
             }
             Self::BasicCancel(m) => {
-                encode_short_string(buf, &m.consumer_tag);
+                encode_short_string(buf, &m.consumer_tag)?;
                 buf.put_u8(if m.no_wait { 1 } else { 0 });
             }
             Self::BasicCancelOk(tag) => {
-                encode_short_string(buf, tag);
+                encode_short_string(buf, tag)?;
             }
             Self::BasicPublish(m) => {
                 buf.put_u16(0); // reserved
-                encode_short_string(buf, &m.exchange);
-                encode_short_string(buf, &m.routing_key);
+                encode_short_string(buf, &m.exchange)?;
+                encode_short_string(buf, &m.routing_key)?;
                 let mut bits = 0u8;
                 if m.mandatory {
                     bits |= 1;
@@ -769,31 +770,31 @@ impl MethodFrame {
             }
             Self::BasicReturn(m) => {
                 buf.put_u16(m.reply_code);
-                encode_short_string(buf, &m.reply_text);
-                encode_short_string(buf, &m.exchange);
-                encode_short_string(buf, &m.routing_key);
+                encode_short_string(buf, &m.reply_text)?;
+                encode_short_string(buf, &m.exchange)?;
+                encode_short_string(buf, &m.routing_key)?;
             }
             Self::BasicDeliver(m) => {
-                encode_short_string(buf, &m.consumer_tag);
+                encode_short_string(buf, &m.consumer_tag)?;
                 buf.put_u64(m.delivery_tag);
                 buf.put_u8(if m.redelivered { 1 } else { 0 });
-                encode_short_string(buf, &m.exchange);
-                encode_short_string(buf, &m.routing_key);
+                encode_short_string(buf, &m.exchange)?;
+                encode_short_string(buf, &m.routing_key)?;
             }
             Self::BasicGet(m) => {
                 buf.put_u16(0); // reserved
-                encode_short_string(buf, &m.queue);
+                encode_short_string(buf, &m.queue)?;
                 buf.put_u8(if m.no_ack { 1 } else { 0 });
             }
             Self::BasicGetOk(m) => {
                 buf.put_u64(m.delivery_tag);
                 buf.put_u8(if m.redelivered { 1 } else { 0 });
-                encode_short_string(buf, &m.exchange);
-                encode_short_string(buf, &m.routing_key);
+                encode_short_string(buf, &m.exchange)?;
+                encode_short_string(buf, &m.routing_key)?;
                 buf.put_u32(m.message_count);
             }
             Self::BasicGetEmpty => {
-                encode_short_string(buf, ""); // reserved (cluster-id)
+                encode_short_string(buf, "")?; // reserved (cluster-id)
             }
             Self::BasicAck(m) => {
                 buf.put_u64(m.delivery_tag);
@@ -831,6 +832,7 @@ impl MethodFrame {
             | Self::TxRollback
             | Self::TxRollbackOk => {}
         }
+        Ok(())
     }
 
     pub fn decode(buf: &mut Bytes) -> Result<Self, ProtocolError> {
@@ -1305,7 +1307,7 @@ mod tests {
 
     fn round_trip(frame: &AMQPFrame) -> AMQPFrame {
         let mut buf = BytesMut::new();
-        frame.encode(&mut buf);
+        frame.encode(&mut buf).unwrap();
         let mut bytes = buf.freeze();
         AMQPFrame::decode(&mut bytes).unwrap()
     }
@@ -1561,7 +1563,7 @@ mod tests {
             payload: FramePayload::Heartbeat,
         };
         let mut buf = BytesMut::new();
-        frame.encode(&mut buf);
+        frame.encode(&mut buf).unwrap();
         // Corrupt the frame end byte
         let len = buf.len();
         buf[len - 1] = 0xFF;

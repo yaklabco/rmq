@@ -102,8 +102,7 @@ impl Encoder<AMQPFrame> for AMQPCodec {
     type Error = ProtocolError;
 
     fn encode(&mut self, item: AMQPFrame, dst: &mut BytesMut) -> Result<(), Self::Error> {
-        item.encode(dst);
-        Ok(())
+        item.encode(dst)
     }
 }
 
@@ -151,7 +150,7 @@ mod tests {
             payload: FramePayload::Heartbeat,
         };
         let mut buf = BytesMut::new();
-        frame.encode(&mut buf);
+        frame.encode(&mut buf).unwrap();
 
         let item = codec.decode(&mut buf).unwrap().unwrap();
         match item {
@@ -174,7 +173,7 @@ mod tests {
             })),
         };
         let mut full = BytesMut::new();
-        frame.encode(&mut full);
+        frame.encode(&mut full).unwrap();
 
         // Feed partial data
         let mut buf = BytesMut::new();
