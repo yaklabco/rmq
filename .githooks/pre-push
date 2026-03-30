@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -e
+
+echo "pre-push: running full CI pipeline..."
+just ci

@@ -138,9 +138,7 @@ impl FieldValue {
             FieldValue::LongString(b) => 4 + b.len() as u32,
             FieldValue::Timestamp(_) => 8,
             FieldValue::FieldTable(t) => 4 + t.encoded_size(),
-            FieldValue::FieldArray(arr) => {
-                4 + arr.iter().map(|v| v.encoded_size()).sum::<u32>()
-            }
+            FieldValue::FieldArray(arr) => 4 + arr.iter().map(|v| v.encoded_size()).sum::<u32>(),
             FieldValue::Void => 0,
         }
     }

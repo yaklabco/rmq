@@ -128,7 +128,11 @@ async fn handle_client(
                     writer.flush().await?;
                 }
 
-                NativeFrame::Consume { queue, batch_size, prefetch } if authenticated => {
+                NativeFrame::Consume {
+                    queue,
+                    batch_size,
+                    prefetch,
+                } if authenticated => {
                     // Ensure queue exists
                     let _ = vhost.declare_queue(QueueConfig {
                         name: queue.clone(),
@@ -147,14 +151,8 @@ async fn handle_client(
 
                     // Start delivering immediately
                     if let Some(ref mut state) = consuming {
-                        deliver_batch(
-                            &vhost,
-                            state,
-                            &batch_counter,
-                            &mut write_buf,
-                            &mut writer,
-                        )
-                        .await?;
+                        deliver_batch(&vhost, state, &batch_counter, &mut write_buf, &mut writer)
+                            .await?;
                     }
                 }
 
@@ -173,8 +171,11 @@ async fn handle_client(
                         }
 
                         // Deliver next batch if we have capacity
-                        let total_unacked: usize =
-                            state.unacked_batches.iter().map(|b| b.positions.len()).sum();
+                        let total_unacked: usize = state
+                            .unacked_batches
+                            .iter()
+                            .map(|b| b.positions.len())
+                            .sum();
                         if total_unacked < state.prefetch as usize {
                             deliver_batch(
                                 &vhost,
@@ -235,7 +236,10 @@ async fn deliver_batch(
         bodies.push(env.message.body.clone());
     }
 
-    state.unacked_batches.push(UnackedBatch { batch_id, positions });
+    state.unacked_batches.push(UnackedBatch {
+        batch_id,
+        positions,
+    });
 
     write_buf.clear();
     NativeFrame::Deliver {
@@ -260,9 +264,8 @@ mod tests {
         let vhost_dir = dir.path().join("vhosts").join("default");
         let vhost = Arc::new(VHost::new("/".into(), &vhost_dir).unwrap());
         let users_path = dir.path().join("users.json");
-        let user_store = Arc::new(
-            UserStore::open_with_defaults(&users_path, "guest", "guest").unwrap(),
-        );
+        let user_store =
+            Arc::new(UserStore::open_with_defaults(&users_path, "guest", "guest").unwrap());
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -312,9 +315,7 @@ mod tests {
 
         // Publish batch of 100 messages
         buf.clear();
-        let messages: Vec<Bytes> = (0..100)
-            .map(|i| Bytes::from(format!("msg-{i}")))
-            .collect();
+        let messages: Vec<Bytes> = (0..100).map(|i| Bytes::from(format!("msg-{i}"))).collect();
         NativeFrame::Publish {
             queue: "native-q".into(),
             messages,

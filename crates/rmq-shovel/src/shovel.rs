@@ -1,9 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use rmq_broker::queue::PublishResult;
 use rmq_broker::vhost::VHost;
-use rmq_protocol::properties::BasicProperties;
 use rmq_storage::message::StoredMessage;
 use tracing::{debug, error, info, warn};
 
@@ -63,7 +61,10 @@ pub async fn run_shovel(
     let mut backoff = Duration::from_millis(100);
     let max_backoff = Duration::from_secs(config.reconnect_delay_max.max(1));
 
-    info!("shovel '{}' starting: {} -> {}/{}", config.name, config.src_queue, config.dest_exchange, config.dest_routing_key);
+    info!(
+        "shovel '{}' starting: {} -> {}/{}",
+        config.name, config.src_queue, config.dest_exchange, config.dest_routing_key
+    );
 
     loop {
         if *cancel.borrow() {
@@ -74,7 +75,10 @@ pub async fn run_shovel(
         let queue = match vhost.get_queue(&config.src_queue) {
             Some(q) => q,
             None => {
-                warn!("shovel '{}': source queue '{}' not found, retrying...", config.name, config.src_queue);
+                warn!(
+                    "shovel '{}': source queue '{}' not found, retrying...",
+                    config.name, config.src_queue
+                );
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(max_backoff);
                 continue;
@@ -101,7 +105,10 @@ pub async fn run_shovel(
                             let _ = queue.ack(&env.segment_position);
                         }
                         transferred += 1;
-                        debug!("shovel '{}': transferred message #{}", config.name, transferred);
+                        debug!(
+                            "shovel '{}': transferred message #{}",
+                            config.name, transferred
+                        );
                     }
                     Err(e) => {
                         warn!("shovel '{}': publish failed: {e}, requeueing", config.name);
@@ -135,6 +142,7 @@ mod tests {
     use bytes::Bytes;
     use rmq_broker::queue::QueueConfig;
     use rmq_protocol::field_table::FieldTable;
+    use rmq_protocol::properties::BasicProperties;
     use tempfile::TempDir;
 
     fn setup_vhost(dir: &std::path::Path) -> Arc<VHost> {
@@ -158,20 +166,30 @@ mod tests {
         let vhost = setup_vhost(dir.path());
 
         // Create source queue and destination queue
-        vhost.declare_queue(QueueConfig {
-            name: "src-queue".into(),
-            durable: false, exclusive: false, auto_delete: false,
-            arguments: FieldTable::new(),
-        }).unwrap();
+        vhost
+            .declare_queue(QueueConfig {
+                name: "src-queue".into(),
+                durable: false,
+                exclusive: false,
+                auto_delete: false,
+                arguments: FieldTable::new(),
+            })
+            .unwrap();
 
-        vhost.declare_queue(QueueConfig {
-            name: "dest-queue".into(),
-            durable: false, exclusive: false, auto_delete: false,
-            arguments: FieldTable::new(),
-        }).unwrap();
+        vhost
+            .declare_queue(QueueConfig {
+                name: "dest-queue".into(),
+                durable: false,
+                exclusive: false,
+                auto_delete: false,
+                arguments: FieldTable::new(),
+            })
+            .unwrap();
 
         // Bind dest queue to amq.direct
-        vhost.bind_queue("dest-queue", "amq.direct", "shoveled", &FieldTable::new()).unwrap();
+        vhost
+            .bind_queue("dest-queue", "amq.direct", "shoveled", &FieldTable::new())
+            .unwrap();
 
         // Publish messages to source
         let src = vhost.get_queue("src-queue").unwrap();
@@ -194,9 +212,8 @@ mod tests {
         // Run shovel briefly then cancel
         let vhost_clone = vhost.clone();
         let config_clone = config.clone();
-        let handle = tokio::spawn(async move {
-            run_shovel(vhost_clone, &config_clone, cancel_rx).await
-        });
+        let handle =
+            tokio::spawn(async move { run_shovel(vhost_clone, &config_clone, cancel_rx).await });
 
         // Wait for messages to transfer
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -216,17 +233,27 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let vhost = setup_vhost(dir.path());
 
-        vhost.declare_queue(QueueConfig {
-            name: "na-src".into(),
-            durable: false, exclusive: false, auto_delete: false,
-            arguments: FieldTable::new(),
-        }).unwrap();
-        vhost.declare_queue(QueueConfig {
-            name: "na-dest".into(),
-            durable: false, exclusive: false, auto_delete: false,
-            arguments: FieldTable::new(),
-        }).unwrap();
-        vhost.bind_queue("na-dest", "amq.direct", "na-key", &FieldTable::new()).unwrap();
+        vhost
+            .declare_queue(QueueConfig {
+                name: "na-src".into(),
+                durable: false,
+                exclusive: false,
+                auto_delete: false,
+                arguments: FieldTable::new(),
+            })
+            .unwrap();
+        vhost
+            .declare_queue(QueueConfig {
+                name: "na-dest".into(),
+                durable: false,
+                exclusive: false,
+                auto_delete: false,
+                arguments: FieldTable::new(),
+            })
+            .unwrap();
+        vhost
+            .bind_queue("na-dest", "amq.direct", "na-key", &FieldTable::new())
+            .unwrap();
 
         let src = vhost.get_queue("na-src").unwrap();
         src.publish(&make_msg("noack")).unwrap();
@@ -243,9 +270,7 @@ mod tests {
 
         let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
         let vhost_clone = vhost.clone();
-        let handle = tokio::spawn(async move {
-            run_shovel(vhost_clone, &config, cancel_rx).await
-        });
+        let handle = tokio::spawn(async move { run_shovel(vhost_clone, &config, cancel_rx).await });
 
         tokio::time::sleep(Duration::from_millis(300)).await;
         cancel_tx.send(true).unwrap();
@@ -269,9 +294,7 @@ mod tests {
         };
 
         let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
-        let handle = tokio::spawn(async move {
-            run_shovel(vhost, &config, cancel_rx).await
-        });
+        let handle = tokio::spawn(async move { run_shovel(vhost, &config, cancel_rx).await });
 
         // Cancel quickly — should not panic
         tokio::time::sleep(Duration::from_millis(200)).await;

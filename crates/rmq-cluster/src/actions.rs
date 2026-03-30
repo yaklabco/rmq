@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use serde::{Deserialize, Serialize};
 
 /// Replication action types.
 #[derive(Debug, Clone, PartialEq)]

@@ -379,9 +379,6 @@ mod tests {
         });
 
         let effective = store.effective_policy_for_exchange("my.exchange");
-        assert_eq!(
-            effective.get_string("alternate-exchange"),
-            Some("unrouted")
-        );
+        assert_eq!(effective.get_string("alternate-exchange"), Some("unrouted"));
     }
 }

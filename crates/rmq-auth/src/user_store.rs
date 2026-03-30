@@ -182,7 +182,12 @@ mod tests {
         let store = UserStore::open(&path).unwrap();
 
         store
-            .create("alice", "password", HashAlgorithm::Sha256, vec![UserTag::Administrator])
+            .create(
+                "alice",
+                "password",
+                HashAlgorithm::Sha256,
+                vec![UserTag::Administrator],
+            )
             .unwrap();
 
         let user = store.authenticate("alice", "password").unwrap();
@@ -231,7 +236,9 @@ mod tests {
         let path = dir.path().join("users.json");
         let store = UserStore::open(&path).unwrap();
 
-        store.create("temp", "pass", HashAlgorithm::Plaintext, vec![]).unwrap();
+        store
+            .create("temp", "pass", HashAlgorithm::Plaintext, vec![])
+            .unwrap();
         assert!(store.get("temp").is_some());
 
         store.delete("temp").unwrap();
@@ -244,14 +251,20 @@ mod tests {
         let path = dir.path().join("users.json");
         let store = UserStore::open(&path).unwrap();
 
-        store.create("alice", "pass", HashAlgorithm::Plaintext, vec![]).unwrap();
+        store
+            .create("alice", "pass", HashAlgorithm::Plaintext, vec![])
+            .unwrap();
 
         store
-            .set_permissions("alice", "/", Permission {
-                configure: "my-.*".to_string(),
-                write: "my-.*".to_string(),
-                read: ".*".to_string(),
-            })
+            .set_permissions(
+                "alice",
+                "/",
+                Permission {
+                    configure: "my-.*".to_string(),
+                    write: "my-.*".to_string(),
+                    read: ".*".to_string(),
+                },
+            )
             .unwrap();
 
         let user = store.get("alice").unwrap();
@@ -266,10 +279,14 @@ mod tests {
         let path = dir.path().join("users.json");
         let store = UserStore::open(&path).unwrap();
 
-        store.create("alice", "old", HashAlgorithm::Plaintext, vec![]).unwrap();
+        store
+            .create("alice", "old", HashAlgorithm::Plaintext, vec![])
+            .unwrap();
         assert!(store.authenticate("alice", "old").is_ok());
 
-        store.set_password("alice", "new", HashAlgorithm::Sha256).unwrap();
+        store
+            .set_password("alice", "new", HashAlgorithm::Sha256)
+            .unwrap();
         assert!(store.authenticate("alice", "old").is_err());
         assert!(store.authenticate("alice", "new").is_ok());
     }
@@ -280,8 +297,12 @@ mod tests {
         let path = dir.path().join("users.json");
         let store = UserStore::open(&path).unwrap();
 
-        store.create("alice", "pass", HashAlgorithm::Plaintext, vec![]).unwrap();
-        let err = store.create("alice", "pass2", HashAlgorithm::Plaintext, vec![]).unwrap_err();
+        store
+            .create("alice", "pass", HashAlgorithm::Plaintext, vec![])
+            .unwrap();
+        let err = store
+            .create("alice", "pass2", HashAlgorithm::Plaintext, vec![])
+            .unwrap_err();
         assert!(matches!(err, UserStoreError::AlreadyExists(_)));
     }
 
@@ -291,8 +312,12 @@ mod tests {
         let path = dir.path().join("users.json");
         let store = UserStore::open(&path).unwrap();
 
-        store.create("alice", "p", HashAlgorithm::Plaintext, vec![]).unwrap();
-        store.create("bob", "p", HashAlgorithm::Plaintext, vec![]).unwrap();
+        store
+            .create("alice", "p", HashAlgorithm::Plaintext, vec![])
+            .unwrap();
+        store
+            .create("bob", "p", HashAlgorithm::Plaintext, vec![])
+            .unwrap();
 
         let mut names = store.list();
         names.sort();

@@ -28,7 +28,11 @@ pub fn apply_action(data_dir: &Path, action: &ReplicationAction) -> io::Result<(
                 .append(true)
                 .open(&full_path)?;
             file.write_all(data)?;
-            debug!("replicated: append {} bytes to {}", data.len(), path.display());
+            debug!(
+                "replicated: append {} bytes to {}",
+                data.len(),
+                path.display()
+            );
         }
         ReplicationAction::Delete { path } => {
             let full_path = data_dir.join(path);
@@ -59,7 +63,6 @@ pub fn decompress_actions(data: &[u8]) -> io::Result<Vec<ReplicationAction>> {
     let mut buf = Bytes::from(decompressed);
     let mut actions = Vec::new();
     while buf.has_remaining() {
-        use bytes::Buf;
         if let Some(action) = ReplicationAction::decode(&mut buf) {
             actions.push(action);
         } else {
@@ -218,8 +221,14 @@ mod tests {
         assert_eq!(stats.files_deleted, 1); // orphan.txt
 
         // Verify follower state
-        assert_eq!(std::fs::read(follower_dir.path().join("a.txt")).unwrap(), b"aaa");
-        assert_eq!(std::fs::read(follower_dir.path().join("b.txt")).unwrap(), b"bbb");
+        assert_eq!(
+            std::fs::read(follower_dir.path().join("a.txt")).unwrap(),
+            b"aaa"
+        );
+        assert_eq!(
+            std::fs::read(follower_dir.path().join("b.txt")).unwrap(),
+            b"bbb"
+        );
         assert!(!follower_dir.path().join("orphan.txt").exists());
     }
 }

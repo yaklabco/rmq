@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
@@ -129,10 +129,7 @@ impl ServerChannel {
         }
     }
 
-    pub fn process_frame(
-        &mut self,
-        frame: AMQPFrame,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn process_frame(&mut self, frame: AMQPFrame) -> Result<(), Box<dyn std::error::Error>> {
         match frame.payload {
             FramePayload::Method(method) => self.handle_method(method),
             FramePayload::Header(header) => self.handle_header(header),
@@ -416,16 +413,22 @@ impl ServerChannel {
                         if !no_ack {
                             loop {
                                 let global_unacked = shared.unacked_count.load(Ordering::Relaxed);
-                                let has_capacity = (prefetch == 0 || consumer_unacked < prefetch as u64)
-                                    && (global_prefetch == 0 || global_unacked < global_prefetch as u64);
+                                let has_capacity = (prefetch == 0
+                                    || consumer_unacked < prefetch as u64)
+                                    && (global_prefetch == 0
+                                        || global_unacked < global_prefetch as u64);
                                 if has_capacity {
                                     break;
                                 }
                                 shared.ack_notify.notified().await;
                                 // Recount consumer unacked from shared list
-                                consumer_unacked = shared.unacked.lock().iter()
+                                consumer_unacked = shared
+                                    .unacked
+                                    .lock()
+                                    .iter()
                                     .filter(|u| u.queue_name == queue_name)
-                                    .count() as u64;
+                                    .count()
+                                    as u64;
                             }
                         }
 
@@ -440,7 +443,11 @@ impl ServerChannel {
                         match queue.shift_batch(batch_size) {
                             Ok((envelopes, dead_letters)) => {
                                 for dl in dead_letters {
-                                    let _ = vhost_for_task.publish(&dl.exchange, &dl.routing_key, &dl.message);
+                                    let _ = vhost_for_task.publish(
+                                        &dl.exchange,
+                                        &dl.routing_key,
+                                        &dl.message,
+                                    );
                                 }
 
                                 if envelopes.is_empty() {
@@ -582,7 +589,9 @@ impl ServerChannel {
                     unacked.retain(|u| u.delivery_tag > ack.delivery_tag);
                     drop(unacked);
                     if acked_count > 0 {
-                        self.shared.unacked_count.fetch_sub(acked_count, Ordering::Relaxed);
+                        self.shared
+                            .unacked_count
+                            .fetch_sub(acked_count, Ordering::Relaxed);
                         self.shared.ack_notify.notify_waiters();
                     }
                 } else if let Some(pos) = unacked
@@ -592,7 +601,9 @@ impl ServerChannel {
                     let entry = unacked.remove(pos);
                     drop(unacked);
                     if let Some(queue) = self.vhost.get_queue(&entry.queue_name) {
-                        queue.ack(&entry.segment_position).map_err(|e| e.to_string())?;
+                        queue
+                            .ack(&entry.segment_position)
+                            .map_err(|e| e.to_string())?;
                     }
                     self.shared.unacked_count.fetch_sub(1, Ordering::Relaxed);
                     self.shared.ack_notify.notify_waiters();
@@ -612,7 +623,9 @@ impl ServerChannel {
                         if reject.requeue {
                             queue.requeue(entry.segment_position);
                         } else {
-                            queue.ack(&entry.segment_position).map_err(|e| e.to_string())?;
+                            queue
+                                .ack(&entry.segment_position)
+                                .map_err(|e| e.to_string())?;
                         }
                     }
                     self.shared.unacked_count.fetch_sub(1, Ordering::Relaxed);
@@ -653,7 +666,9 @@ impl ServerChannel {
                     }
                 }
                 if nacked_count > 0 {
-                    self.shared.unacked_count.fetch_sub(nacked_count, Ordering::Relaxed);
+                    self.shared
+                        .unacked_count
+                        .fetch_sub(nacked_count, Ordering::Relaxed);
                     self.shared.ack_notify.notify_waiters();
                 }
                 Ok(())
@@ -676,10 +691,13 @@ impl ServerChannel {
                 match queue.shift() {
                     Ok((Some(env), dead_letters)) => {
                         for dl in dead_letters {
-                            let _ = self.vhost.publish(&dl.exchange, &dl.routing_key, &dl.message);
+                            let _ = self
+                                .vhost
+                                .publish(&dl.exchange, &dl.routing_key, &dl.message);
                         }
 
-                        let delivery_tag = self.next_delivery_tag.fetch_add(1, Ordering::Relaxed) + 1;
+                        let delivery_tag =
+                            self.next_delivery_tag.fetch_add(1, Ordering::Relaxed) + 1;
                         let sp = env.segment_position;
                         let msg = &env.message;
                         let body_len = msg.body.len() as u64;
@@ -727,7 +745,9 @@ impl ServerChannel {
                     }
                     Ok((None, dead_letters)) => {
                         for dl in dead_letters {
-                            let _ = self.vhost.publish(&dl.exchange, &dl.routing_key, &dl.message);
+                            let _ = self
+                                .vhost
+                                .publish(&dl.exchange, &dl.routing_key, &dl.message);
                         }
                         self.send(MethodFrame::BasicGetEmpty)?;
                     }
@@ -788,7 +808,10 @@ impl ServerChannel {
                 let publishes = std::mem::take(&mut self.tx_publishes);
                 let mut tx_errors: Vec<String> = Vec::new();
                 for tx_pub in publishes {
-                    if let Err(e) = self.vhost.publish(&tx_pub.exchange, &tx_pub.routing_key, &tx_pub.message) {
+                    if let Err(e) =
+                        self.vhost
+                            .publish(&tx_pub.exchange, &tx_pub.routing_key, &tx_pub.message)
+                    {
                         tx_errors.push(format!("publish to '{}': {e}", tx_pub.exchange));
                     }
                 }
@@ -798,12 +821,17 @@ impl ServerChannel {
                 for tx_ack in acks {
                     let mut unacked = self.shared.unacked.lock();
                     let to_process: Vec<Unacked> = if tx_ack.multiple {
-                        let items: Vec<_> = unacked.iter()
+                        let items: Vec<_> = unacked
+                            .iter()
                             .filter(|u| u.delivery_tag <= tx_ack.delivery_tag)
-                            .cloned().collect();
+                            .cloned()
+                            .collect();
                         unacked.retain(|u| u.delivery_tag > tx_ack.delivery_tag);
                         items
-                    } else if let Some(pos) = unacked.iter().position(|u| u.delivery_tag == tx_ack.delivery_tag) {
+                    } else if let Some(pos) = unacked
+                        .iter()
+                        .position(|u| u.delivery_tag == tx_ack.delivery_tag)
+                    {
                         vec![unacked.remove(pos)]
                     } else {
                         vec![]
@@ -821,7 +849,9 @@ impl ServerChannel {
                         }
                     }
                     if count > 0 {
-                        self.shared.unacked_count.fetch_sub(count, Ordering::Relaxed);
+                        self.shared
+                            .unacked_count
+                            .fetch_sub(count, Ordering::Relaxed);
                         self.shared.ack_notify.notify_waiters();
                     }
                 }
@@ -898,10 +928,7 @@ impl ServerChannel {
     }
 
     fn finish_publish(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let state = self
-            .publish_state
-            .take()
-            .ok_or("no publish in progress")?;
+        let state = self.publish_state.take().ok_or("no publish in progress")?;
 
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -929,7 +956,9 @@ impl ServerChannel {
             return Ok(());
         }
 
-        let result = self.vhost.publish(&state.exchange, &state.routing_key, &msg);
+        let result = self
+            .vhost
+            .publish(&state.exchange, &state.routing_key, &msg);
 
         if self.confirm_mode {
             self.confirm_counter += 1;

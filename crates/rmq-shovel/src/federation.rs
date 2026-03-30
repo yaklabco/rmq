@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rmq_broker::vhost::VHost;
-use rmq_protocol::properties::BasicProperties;
 use rmq_storage::message::StoredMessage;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
@@ -152,6 +151,7 @@ mod tests {
     use bytes::Bytes;
     use rmq_broker::queue::QueueConfig;
     use rmq_protocol::field_table::FieldTable;
+    use rmq_protocol::properties::BasicProperties;
     use tempfile::TempDir;
 
     fn setup_vhost(dir: &std::path::Path) -> Arc<VHost> {
@@ -165,17 +165,27 @@ mod tests {
         let vhost = setup_vhost(dir.path());
 
         // Create source and destination infrastructure
-        vhost.declare_queue(QueueConfig {
-            name: "fed-src".into(),
-            durable: false, exclusive: false, auto_delete: false,
-            arguments: FieldTable::new(),
-        }).unwrap();
-        vhost.declare_queue(QueueConfig {
-            name: "fed-dest".into(),
-            durable: false, exclusive: false, auto_delete: false,
-            arguments: FieldTable::new(),
-        }).unwrap();
-        vhost.bind_queue("fed-dest", "amq.direct", "fed-key", &FieldTable::new()).unwrap();
+        vhost
+            .declare_queue(QueueConfig {
+                name: "fed-src".into(),
+                durable: false,
+                exclusive: false,
+                auto_delete: false,
+                arguments: FieldTable::new(),
+            })
+            .unwrap();
+        vhost
+            .declare_queue(QueueConfig {
+                name: "fed-dest".into(),
+                durable: false,
+                exclusive: false,
+                auto_delete: false,
+                arguments: FieldTable::new(),
+            })
+            .unwrap();
+        vhost
+            .bind_queue("fed-dest", "amq.direct", "fed-key", &FieldTable::new())
+            .unwrap();
 
         // Put messages in source
         let src = vhost.get_queue("fed-src").unwrap();
@@ -225,11 +235,15 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let vhost = setup_vhost(dir.path());
 
-        vhost.declare_queue(QueueConfig {
-            name: "hop-src".into(),
-            durable: false, exclusive: false, auto_delete: false,
-            arguments: FieldTable::new(),
-        }).unwrap();
+        vhost
+            .declare_queue(QueueConfig {
+                name: "hop-src".into(),
+                durable: false,
+                exclusive: false,
+                auto_delete: false,
+                arguments: FieldTable::new(),
+            })
+            .unwrap();
 
         // Message already at max hops
         let src = vhost.get_queue("hop-src").unwrap();

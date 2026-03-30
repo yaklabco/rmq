@@ -44,23 +44,20 @@ impl ShovelRunner {
         let (cancel_tx, cancel_rx) = watch::channel(false);
         let vhost = self.vhost.clone();
 
-        let handle = tokio::spawn(async move {
-            run_shovel(vhost, &config, cancel_rx).await
-        });
+        let handle = tokio::spawn(async move { run_shovel(vhost, &config, cancel_rx).await });
 
-        self.shovels.lock().insert(name, RunningTask {
-            cancel_tx,
-            handle,
-            state: RunnerState::Running,
-        });
+        self.shovels.lock().insert(
+            name,
+            RunningTask {
+                cancel_tx,
+                handle,
+                state: RunnerState::Running,
+            },
+        );
     }
 
     /// Start a federation link.
-    pub fn start_federation(
-        self: &Arc<Self>,
-        upstream: FederationUpstream,
-        src_queue: String,
-    ) {
+    pub fn start_federation(self: &Arc<Self>, upstream: FederationUpstream, src_queue: String) {
         let name = upstream.name.clone();
         let (cancel_tx, cancel_rx) = watch::channel(false);
         let vhost = self.vhost.clone();
@@ -69,11 +66,14 @@ impl ShovelRunner {
             run_federation_link(vhost, &upstream, &src_queue, cancel_rx).await
         });
 
-        self.shovels.lock().insert(name, RunningTask {
-            cancel_tx,
-            handle,
-            state: RunnerState::Running,
-        });
+        self.shovels.lock().insert(
+            name,
+            RunningTask {
+                cancel_tx,
+                handle,
+                state: RunnerState::Running,
+            },
+        );
     }
 
     /// Stop a shovel or federation link by name.
@@ -117,8 +117,8 @@ mod tests {
     use rmq_protocol::field_table::FieldTable;
     use rmq_protocol::properties::BasicProperties;
     use rmq_storage::message::StoredMessage;
-    use tempfile::TempDir;
     use std::time::Duration;
+    use tempfile::TempDir;
 
     fn setup_vhost(dir: &std::path::Path) -> Arc<VHost> {
         let vhost_dir = dir.join("vhosts").join("default");
@@ -130,17 +130,27 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let vhost = setup_vhost(dir.path());
 
-        vhost.declare_queue(QueueConfig {
-            name: "r-src".into(),
-            durable: false, exclusive: false, auto_delete: false,
-            arguments: FieldTable::new(),
-        }).unwrap();
-        vhost.declare_queue(QueueConfig {
-            name: "r-dest".into(),
-            durable: false, exclusive: false, auto_delete: false,
-            arguments: FieldTable::new(),
-        }).unwrap();
-        vhost.bind_queue("r-dest", "amq.direct", "r-key", &FieldTable::new()).unwrap();
+        vhost
+            .declare_queue(QueueConfig {
+                name: "r-src".into(),
+                durable: false,
+                exclusive: false,
+                auto_delete: false,
+                arguments: FieldTable::new(),
+            })
+            .unwrap();
+        vhost
+            .declare_queue(QueueConfig {
+                name: "r-dest".into(),
+                durable: false,
+                exclusive: false,
+                auto_delete: false,
+                arguments: FieldTable::new(),
+            })
+            .unwrap();
+        vhost
+            .bind_queue("r-dest", "amq.direct", "r-key", &FieldTable::new())
+            .unwrap();
 
         let runner = ShovelRunner::new(vhost.clone());
 
@@ -165,7 +175,8 @@ mod tests {
             routing_key: "r-key".into(),
             properties: BasicProperties::default(),
             body: Bytes::from_static(b"runner-msg"),
-        }).unwrap();
+        })
+        .unwrap();
 
         tokio::time::sleep(Duration::from_millis(300)).await;
 

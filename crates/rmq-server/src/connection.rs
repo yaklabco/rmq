@@ -76,8 +76,12 @@ impl Connection {
     }
 
     /// Core connection handler — works with any async read/write stream.
-    async fn handle_stream<S>(stream: S, vhost: Arc<VHost>, user_store: Arc<UserStore>, peer_addr: String)
-    where
+    async fn handle_stream<S>(
+        stream: S,
+        vhost: Arc<VHost>,
+        user_store: Arc<UserStore>,
+        peer_addr: String,
+    ) where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         info!("new connection from {peer_addr}");
@@ -138,18 +142,9 @@ impl Connection {
 
         // Send Connection.Start
         let mut server_properties = FieldTable::new();
-        server_properties.insert(
-            "product",
-            FieldValue::ShortString("RMQ".into()),
-        );
-        server_properties.insert(
-            "version",
-            FieldValue::ShortString("0.1.0".into()),
-        );
-        server_properties.insert(
-            "platform",
-            FieldValue::ShortString("Rust/Tokio".into()),
-        );
+        server_properties.insert("product", FieldValue::ShortString("RMQ".into()));
+        server_properties.insert("version", FieldValue::ShortString("0.1.0".into()));
+        server_properties.insert("platform", FieldValue::ShortString("Rust/Tokio".into()));
 
         let mut capabilities = FieldTable::new();
         capabilities.insert("publisher_confirms", FieldValue::Bool(true));
@@ -401,11 +396,7 @@ impl Connection {
                 if self.channels.contains_key(&channel_id) {
                     return Err("channel already open".into());
                 }
-                let channel = ServerChannel::new(
-                    channel_id,
-                    self.vhost.clone(),
-                    self.tx.clone(),
-                );
+                let channel = ServerChannel::new(channel_id, self.vhost.clone(), self.tx.clone());
                 self.channels.insert(channel_id, channel);
 
                 let open_ok = AMQPFrame {

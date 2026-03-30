@@ -113,7 +113,7 @@ impl MqttPacket {
         match self {
             MqttPacket::ConnAck(p) => {
                 buf.put_u8(0x20); // CONNACK
-                buf.put_u8(2);    // remaining length
+                buf.put_u8(2); // remaining length
                 buf.put_u8(if p.session_present { 1 } else { 0 });
                 buf.put_u8(p.return_code);
             }
@@ -395,9 +395,7 @@ fn decode_remaining_length(data: &[u8]) -> Result<(usize, usize), MqttError> {
 /// MQTT uses `/` as separator, AMQP uses `.`.
 /// MQTT `+` wildcard → AMQP `*`, MQTT `#` → AMQP `#`.
 pub fn mqtt_topic_to_amqp_routing_key(topic: &str) -> String {
-    topic
-        .replace('/', ".")
-        .replace('+', "*")
+    topic.replace('/', ".").replace('+', "*")
 }
 
 /// Convert AMQP routing key back to MQTT topic.

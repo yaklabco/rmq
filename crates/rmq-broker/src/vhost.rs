@@ -85,7 +85,9 @@ impl VHost {
         // Default (nameless) exchange
         exchanges.insert(
             String::new(),
-            Arc::new(RwLock::new(Box::new(DefaultExchange::new()) as Box<dyn Exchange>)),
+            Arc::new(RwLock::new(
+                Box::new(DefaultExchange::new()) as Box<dyn Exchange>
+            )),
         );
 
         // amq.direct
@@ -159,10 +161,7 @@ impl VHost {
         }
 
         let exchange = create_exchange(config.clone());
-        exchanges.insert(
-            config.name.clone(),
-            Arc::new(RwLock::new(exchange)),
-        );
+        exchanges.insert(config.name.clone(), Arc::new(RwLock::new(exchange)));
         drop(exchanges);
         self.save_metadata();
         Ok(true)
@@ -221,8 +220,8 @@ impl VHost {
                 .join(queue_dir_name(&config.name))
         };
 
-        let store = MessageStore::open(&queue_dir)
-            .map_err(|e| VHostError::InternalError(e.to_string()))?;
+        let store =
+            MessageStore::open(&queue_dir).map_err(|e| VHostError::InternalError(e.to_string()))?;
 
         let queue = Arc::new(Queue::new(config.clone(), store));
         queues.insert(config.name.clone(), queue.clone());
@@ -329,7 +328,9 @@ impl VHost {
             .get_exchange(exchange_name)
             .ok_or_else(|| VHostError::NotFound(format!("exchange '{exchange_name}' not found")))?;
 
-        let destinations = exchange.read().route(routing_key, msg.properties.headers.as_ref());
+        let destinations = exchange
+            .read()
+            .route(routing_key, msg.properties.headers.as_ref());
 
         let queues = self.queues.read();
         let mut count = 0u32;

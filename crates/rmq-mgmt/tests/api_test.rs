@@ -1,4 +1,3 @@
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use reqwest::StatusCode;
@@ -14,14 +13,10 @@ async fn start_api() -> (String, tempfile::TempDir) {
     let vhost = Arc::new(VHost::new("/".into(), &vhost_dir).unwrap());
 
     let users_path = dir.path().join("users.json");
-    let user_store = Arc::new(
-        UserStore::open_with_defaults(&users_path, "guest", "guest").unwrap(),
-    );
+    let user_store =
+        Arc::new(UserStore::open_with_defaults(&users_path, "guest", "guest").unwrap());
 
-    let state = AppState {
-        vhost,
-        user_store,
-    };
+    let state = AppState { vhost, user_store };
     let app = api_router().with_state(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -102,7 +97,10 @@ async fn test_list_exchanges() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body: Vec<serde_json::Value> = resp.json().await.unwrap();
     // Should have default exchanges
-    let names: Vec<String> = body.iter().map(|e| e["name"].as_str().unwrap().to_string()).collect();
+    let names: Vec<String> = body
+        .iter()
+        .map(|e| e["name"].as_str().unwrap().to_string())
+        .collect();
     assert!(names.contains(&"amq.direct".to_string()));
     assert!(names.contains(&"amq.fanout".to_string()));
     assert!(names.contains(&"amq.topic".to_string()));
@@ -194,7 +192,10 @@ async fn test_user_crud() {
         .await
         .unwrap();
     let users: Vec<serde_json::Value> = resp.json().await.unwrap();
-    let names: Vec<String> = users.iter().map(|u| u["name"].as_str().unwrap().to_string()).collect();
+    let names: Vec<String> = users
+        .iter()
+        .map(|u| u["name"].as_str().unwrap().to_string())
+        .collect();
     assert!(names.contains(&"guest".to_string()));
     assert!(names.contains(&"alice".to_string()));
 
@@ -256,12 +257,10 @@ async fn test_create_binding_via_api() {
         .unwrap();
 
     // Create binding
-    let resp = auth(client().post(format!(
-        "{base}/api/bindings/%2F/e/amq.direct/q/bind-q"
-    )))
-    .json(&serde_json::json!({"routing_key": "my-key"}))
-    .send()
-    .await
-    .unwrap();
+    let resp = auth(client().post(format!("{base}/api/bindings/%2F/e/amq.direct/q/bind-q")))
+        .json(&serde_json::json!({"routing_key": "my-key"}))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
 }

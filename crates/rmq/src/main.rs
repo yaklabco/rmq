@@ -52,8 +52,7 @@ struct Cli {
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -66,7 +65,11 @@ async fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(&cli.data_dir)?;
 
     let users_path = cli.data_dir.join("users.json");
-    let user_store = Arc::new(UserStore::open_with_defaults(&users_path, "guest", "guest")?);
+    let user_store = Arc::new(UserStore::open_with_defaults(
+        &users_path,
+        "guest",
+        "guest",
+    )?);
     info!("user store initialized");
 
     let vhost_dir = cli.data_dir.join("vhosts").join("default");

@@ -89,23 +89,27 @@ mod tests {
 
         {
             let mut store = ShovelStore::open(&path).unwrap();
-            store.add_shovel(ShovelConfig {
-                name: "s1".into(),
-                src_queue: "q1".into(),
-                dest_exchange: "ex1".into(),
-                dest_routing_key: "k1".into(),
-                prefetch: 10,
-                ack_mode: AckMode::OnConfirm,
-                reconnect_delay_max: 30,
-            }).unwrap();
-            store.add_upstream(FederationUpstream {
-                name: "u1".into(),
-                uri: "amqp://remote".into(),
-                exchange: "ex1".into(),
-                max_hops: 5,
-                prefetch: 10,
-                reconnect_delay: 5,
-            }).unwrap();
+            store
+                .add_shovel(ShovelConfig {
+                    name: "s1".into(),
+                    src_queue: "q1".into(),
+                    dest_exchange: "ex1".into(),
+                    dest_routing_key: "k1".into(),
+                    prefetch: 10,
+                    ack_mode: AckMode::OnConfirm,
+                    reconnect_delay_max: 30,
+                })
+                .unwrap();
+            store
+                .add_upstream(FederationUpstream {
+                    name: "u1".into(),
+                    uri: "amqp://remote".into(),
+                    exchange: "ex1".into(),
+                    max_hops: 5,
+                    prefetch: 10,
+                    reconnect_delay: 5,
+                })
+                .unwrap();
         }
 
         let store = ShovelStore::open(&path).unwrap();
@@ -121,15 +125,17 @@ mod tests {
         let path = dir.path().join("shovels.json");
 
         let mut store = ShovelStore::open(&path).unwrap();
-        store.add_shovel(ShovelConfig {
-            name: "s1".into(),
-            src_queue: "q1".into(),
-            dest_exchange: "ex1".into(),
-            dest_routing_key: "k1".into(),
-            prefetch: 10,
-            ack_mode: AckMode::OnConfirm,
-            reconnect_delay_max: 30,
-        }).unwrap();
+        store
+            .add_shovel(ShovelConfig {
+                name: "s1".into(),
+                src_queue: "q1".into(),
+                dest_exchange: "ex1".into(),
+                dest_routing_key: "k1".into(),
+                prefetch: 10,
+                ack_mode: AckMode::OnConfirm,
+                reconnect_delay_max: 30,
+            })
+            .unwrap();
 
         assert!(store.remove_shovel("s1").unwrap());
         assert!(!store.remove_shovel("s1").unwrap()); // already removed

@@ -17,9 +17,8 @@ async fn start_server() -> (SocketAddr, Arc<VHost>, tempfile::TempDir) {
     let vhost = Arc::new(VHost::new("/".into(), &vhost_dir).unwrap());
 
     let users_path = dir.path().join("users.json");
-    let user_store = Arc::new(
-        UserStore::open_with_defaults(&users_path, "guest", "guest").unwrap(),
-    );
+    let user_store =
+        Arc::new(UserStore::open_with_defaults(&users_path, "guest", "guest").unwrap());
 
     // Bind to port 0 to get a random available port
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -220,7 +219,11 @@ async fn test_fanout_exchange() {
     // Declare 3 queues and bind all to amq.fanout
     for name in &["fan-q1", "fan-q2", "fan-q3"] {
         channel
-            .queue_declare(name, QueueDeclareOptions::default(), LapinFieldTable::default())
+            .queue_declare(
+                name,
+                QueueDeclareOptions::default(),
+                LapinFieldTable::default(),
+            )
             .await
             .unwrap();
 
@@ -353,10 +356,7 @@ async fn test_publisher_confirms() {
 
     // Wait for the confirmation
     let confirmation = confirm.await.unwrap();
-    assert!(
-        confirmation.is_ack(),
-        "expected publisher confirm ack"
-    );
+    assert!(confirmation.is_ack(), "expected publisher confirm ack");
 
     conn.close(200, "OK").await.unwrap();
 }
@@ -505,36 +505,103 @@ async fn test_topic_exchange() {
 
     for name in &["topic-all", "topic-usd", "topic-nyse"] {
         channel
-            .queue_declare(name, QueueDeclareOptions::default(), LapinFieldTable::default())
+            .queue_declare(
+                name,
+                QueueDeclareOptions::default(),
+                LapinFieldTable::default(),
+            )
             .await
             .unwrap();
     }
 
-    channel.queue_bind("topic-all", "test-topic", "stock.#", QueueBindOptions::default(), LapinFieldTable::default()).await.unwrap();
-    channel.queue_bind("topic-usd", "test-topic", "stock.usd.*", QueueBindOptions::default(), LapinFieldTable::default()).await.unwrap();
-    channel.queue_bind("topic-nyse", "test-topic", "*.*.nyse", QueueBindOptions::default(), LapinFieldTable::default()).await.unwrap();
+    channel
+        .queue_bind(
+            "topic-all",
+            "test-topic",
+            "stock.#",
+            QueueBindOptions::default(),
+            LapinFieldTable::default(),
+        )
+        .await
+        .unwrap();
+    channel
+        .queue_bind(
+            "topic-usd",
+            "test-topic",
+            "stock.usd.*",
+            QueueBindOptions::default(),
+            LapinFieldTable::default(),
+        )
+        .await
+        .unwrap();
+    channel
+        .queue_bind(
+            "topic-nyse",
+            "test-topic",
+            "*.*.nyse",
+            QueueBindOptions::default(),
+            LapinFieldTable::default(),
+        )
+        .await
+        .unwrap();
 
-    channel.basic_publish("test-topic", "stock.usd.nyse", BasicPublishOptions::default(), b"usd-nyse", LapinProperties::default()).await.unwrap();
-    channel.basic_publish("test-topic", "stock.eur.lse", BasicPublishOptions::default(), b"eur-lse", LapinProperties::default()).await.unwrap();
+    channel
+        .basic_publish(
+            "test-topic",
+            "stock.usd.nyse",
+            BasicPublishOptions::default(),
+            b"usd-nyse",
+            LapinProperties::default(),
+        )
+        .await
+        .unwrap();
+    channel
+        .basic_publish(
+            "test-topic",
+            "stock.eur.lse",
+            BasicPublishOptions::default(),
+            b"eur-lse",
+            LapinProperties::default(),
+        )
+        .await
+        .unwrap();
 
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     // topic-all: both messages (stock.#)
-    let m1 = channel.basic_get("topic-all", BasicGetOptions { no_ack: true }).await.unwrap();
+    let m1 = channel
+        .basic_get("topic-all", BasicGetOptions { no_ack: true })
+        .await
+        .unwrap();
     assert!(m1.is_some(), "topic-all should have first message");
-    let m2 = channel.basic_get("topic-all", BasicGetOptions { no_ack: true }).await.unwrap();
+    let m2 = channel
+        .basic_get("topic-all", BasicGetOptions { no_ack: true })
+        .await
+        .unwrap();
     assert!(m2.is_some(), "topic-all should have second message");
 
     // topic-usd: only stock.usd.nyse (stock.usd.*)
-    let m = channel.basic_get("topic-usd", BasicGetOptions { no_ack: true }).await.unwrap();
+    let m = channel
+        .basic_get("topic-usd", BasicGetOptions { no_ack: true })
+        .await
+        .unwrap();
     assert_eq!(m.unwrap().data, b"usd-nyse");
-    let empty = channel.basic_get("topic-usd", BasicGetOptions { no_ack: true }).await.unwrap();
+    let empty = channel
+        .basic_get("topic-usd", BasicGetOptions { no_ack: true })
+        .await
+        .unwrap();
     assert!(empty.is_none());
 
     // topic-nyse: only stock.usd.nyse (*.*.nyse)
-    let m = channel.basic_get("topic-nyse", BasicGetOptions { no_ack: true }).await.unwrap();
+    let m = channel
+        .basic_get("topic-nyse", BasicGetOptions { no_ack: true })
+        .await
+        .unwrap();
     assert_eq!(m.unwrap().data, b"usd-nyse");
-    let empty = channel.basic_get("topic-nyse", BasicGetOptions { no_ack: true }).await.unwrap();
+    let empty = channel
+        .basic_get("topic-nyse", BasicGetOptions { no_ack: true })
+        .await
+        .unwrap();
     assert!(empty.is_none());
 
     conn.close(200, "OK").await.unwrap();
@@ -553,14 +620,24 @@ async fn test_prefetch_limits_delivery() {
         .unwrap();
 
     channel
-        .queue_declare("prefetch-q", QueueDeclareOptions::default(), LapinFieldTable::default())
+        .queue_declare(
+            "prefetch-q",
+            QueueDeclareOptions::default(),
+            LapinFieldTable::default(),
+        )
         .await
         .unwrap();
 
     // Publish 5 messages
     for i in 0..5 {
         channel
-            .basic_publish("", "prefetch-q", BasicPublishOptions::default(), format!("msg{i}").as_bytes(), LapinProperties::default())
+            .basic_publish(
+                "",
+                "prefetch-q",
+                BasicPublishOptions::default(),
+                format!("msg{i}").as_bytes(),
+                LapinProperties::default(),
+            )
             .await
             .unwrap();
     }
@@ -572,7 +649,10 @@ async fn test_prefetch_limits_delivery() {
         .basic_consume(
             "prefetch-q",
             "prefetch-ctag",
-            BasicConsumeOptions { no_ack: false, ..Default::default() },
+            BasicConsumeOptions {
+                no_ack: false,
+                ..Default::default()
+            },
             LapinFieldTable::default(),
         )
         .await
@@ -581,19 +661,37 @@ async fn test_prefetch_limits_delivery() {
     // Should receive 2 messages (prefetch limit)
     use futures_lite::StreamExt;
 
-    let d1 = tokio::time::timeout(Duration::from_secs(2), consumer.next()).await.unwrap().unwrap().unwrap();
+    let d1 = tokio::time::timeout(Duration::from_secs(2), consumer.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
     assert_eq!(d1.data, b"msg0");
-    let d2 = tokio::time::timeout(Duration::from_secs(2), consumer.next()).await.unwrap().unwrap().unwrap();
+    let d2 = tokio::time::timeout(Duration::from_secs(2), consumer.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
     assert_eq!(d2.data, b"msg1");
 
     // Third message should NOT arrive yet (prefetch=2, 2 unacked)
     let timeout_result = tokio::time::timeout(Duration::from_millis(300), consumer.next()).await;
-    assert!(timeout_result.is_err(), "should not receive 3rd message while 2 are unacked");
+    assert!(
+        timeout_result.is_err(),
+        "should not receive 3rd message while 2 are unacked"
+    );
 
     // Ack first message — should unblock delivery of 3rd
-    channel.basic_ack(d1.delivery_tag, BasicAckOptions::default()).await.unwrap();
+    channel
+        .basic_ack(d1.delivery_tag, BasicAckOptions::default())
+        .await
+        .unwrap();
 
-    let d3 = tokio::time::timeout(Duration::from_secs(2), consumer.next()).await.unwrap().unwrap().unwrap();
+    let d3 = tokio::time::timeout(Duration::from_secs(2), consumer.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
     assert_eq!(d3.data, b"msg2");
 
     conn.close(200, "OK").await.unwrap();
@@ -606,7 +704,11 @@ async fn test_transaction_commit() {
     let channel = conn.create_channel().await.unwrap();
 
     channel
-        .queue_declare("tx-queue", QueueDeclareOptions::default(), LapinFieldTable::default())
+        .queue_declare(
+            "tx-queue",
+            QueueDeclareOptions::default(),
+            LapinFieldTable::default(),
+        )
         .await
         .unwrap();
 
@@ -615,18 +717,36 @@ async fn test_transaction_commit() {
 
     // Publish within transaction
     channel
-        .basic_publish("", "tx-queue", BasicPublishOptions::default(), b"tx-msg-1", LapinProperties::default())
+        .basic_publish(
+            "",
+            "tx-queue",
+            BasicPublishOptions::default(),
+            b"tx-msg-1",
+            LapinProperties::default(),
+        )
         .await
         .unwrap();
     channel
-        .basic_publish("", "tx-queue", BasicPublishOptions::default(), b"tx-msg-2", LapinProperties::default())
+        .basic_publish(
+            "",
+            "tx-queue",
+            BasicPublishOptions::default(),
+            b"tx-msg-2",
+            LapinProperties::default(),
+        )
         .await
         .unwrap();
 
     // Messages should NOT be visible yet
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let get = channel.basic_get("tx-queue", BasicGetOptions { no_ack: true }).await.unwrap();
-    assert!(get.is_none(), "messages should not be visible before commit");
+    let get = channel
+        .basic_get("tx-queue", BasicGetOptions { no_ack: true })
+        .await
+        .unwrap();
+    assert!(
+        get.is_none(),
+        "messages should not be visible before commit"
+    );
 
     // Commit
     channel.tx_commit().await.unwrap();
@@ -634,9 +754,15 @@ async fn test_transaction_commit() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Now messages should be visible
-    let get1 = channel.basic_get("tx-queue", BasicGetOptions { no_ack: true }).await.unwrap();
+    let get1 = channel
+        .basic_get("tx-queue", BasicGetOptions { no_ack: true })
+        .await
+        .unwrap();
     assert_eq!(get1.unwrap().data, b"tx-msg-1");
-    let get2 = channel.basic_get("tx-queue", BasicGetOptions { no_ack: true }).await.unwrap();
+    let get2 = channel
+        .basic_get("tx-queue", BasicGetOptions { no_ack: true })
+        .await
+        .unwrap();
     assert_eq!(get2.unwrap().data, b"tx-msg-2");
 
     conn.close(200, "OK").await.unwrap();
@@ -649,14 +775,24 @@ async fn test_transaction_rollback() {
     let channel = conn.create_channel().await.unwrap();
 
     channel
-        .queue_declare("tx-rb-queue", QueueDeclareOptions::default(), LapinFieldTable::default())
+        .queue_declare(
+            "tx-rb-queue",
+            QueueDeclareOptions::default(),
+            LapinFieldTable::default(),
+        )
         .await
         .unwrap();
 
     channel.tx_select().await.unwrap();
 
     channel
-        .basic_publish("", "tx-rb-queue", BasicPublishOptions::default(), b"rolled-back", LapinProperties::default())
+        .basic_publish(
+            "",
+            "tx-rb-queue",
+            BasicPublishOptions::default(),
+            b"rolled-back",
+            LapinProperties::default(),
+        )
         .await
         .unwrap();
 
@@ -666,7 +802,10 @@ async fn test_transaction_rollback() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Message should NOT exist
-    let get = channel.basic_get("tx-rb-queue", BasicGetOptions { no_ack: true }).await.unwrap();
+    let get = channel
+        .basic_get("tx-rb-queue", BasicGetOptions { no_ack: true })
+        .await
+        .unwrap();
     assert!(get.is_none(), "rolled back messages should not be visible");
 
     conn.close(200, "OK").await.unwrap();
@@ -681,9 +820,8 @@ async fn test_tls_connection() {
     let vhost_dir = dir.path().join("vhosts").join("default");
     let vhost = Arc::new(VHost::new("/".into(), &vhost_dir).unwrap());
     let users_path = dir.path().join("users.json");
-    let user_store = Arc::new(
-        UserStore::open_with_defaults(&users_path, "guest", "guest").unwrap(),
-    );
+    let user_store =
+        Arc::new(UserStore::open_with_defaults(&users_path, "guest", "guest").unwrap());
 
     // Generate self-signed cert
     let subject_alt_names = vec!["localhost".to_string(), "127.0.0.1".to_string()];

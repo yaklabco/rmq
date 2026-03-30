@@ -811,8 +811,12 @@ impl MethodFrame {
             }
             Self::ConfirmSelectOk => {}
 
-            Self::TxSelect | Self::TxSelectOk | Self::TxCommit | Self::TxCommitOk
-            | Self::TxRollback | Self::TxRollbackOk => {}
+            Self::TxSelect
+            | Self::TxSelectOk
+            | Self::TxCommit
+            | Self::TxCommitOk
+            | Self::TxRollback
+            | Self::TxRollbackOk => {}
         }
     }
 

@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
@@ -123,8 +123,7 @@ enum Command {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "warn".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
         )
         .init();
 
@@ -141,7 +140,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             persistent,
         } => {
             run_publish(
-                &cli.uri, count, size, publishers, &exchange, &routing_key, confirm, persistent,
+                &cli.uri,
+                count,
+                size,
+                publishers,
+                &exchange,
+                &routing_key,
+                confirm,
+                persistent,
             )
             .await?;
         }
@@ -153,7 +159,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             count,
             duration,
         } => {
-            run_consume(&cli.uri, &queue, consumers, prefetch, no_ack, count, duration).await?;
+            run_consume(
+                &cli.uri, &queue, consumers, prefetch, no_ack, count, duration,
+            )
+            .await?;
         }
         Command::Throughput {
             count,
@@ -199,9 +208,7 @@ async fn run_publish(
     let body = vec![b'x'; size];
     let per_publisher = count / publishers as u64;
 
-    println!(
-        "Publishing {count} messages ({size} bytes each) with {publishers} publisher(s)..."
-    );
+    println!("Publishing {count} messages ({size} bytes each) with {publishers} publisher(s)...");
 
     // Declare the queue
     let conn = Connection::connect(uri, ConnectionProperties::default()).await?;
@@ -313,9 +320,7 @@ async fn run_consume(
     max_count: u64,
     max_duration: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!(
-        "Consuming from '{queue}' with {consumers} consumer(s), prefetch={prefetch}..."
-    );
+    println!("Consuming from '{queue}' with {consumers} consumer(s), prefetch={prefetch}...");
 
     let consumed = Arc::new(AtomicU64::new(0));
     let start = Instant::now();
@@ -583,8 +588,12 @@ async fn run_sharded(
     let ch = conn.create_channel().await?;
     for i in 0..shards {
         let qname = format!("shard-{i}");
-        ch.queue_declare(&qname, QueueDeclareOptions::default(), FieldTable::default())
-            .await?;
+        ch.queue_declare(
+            &qname,
+            QueueDeclareOptions::default(),
+            FieldTable::default(),
+        )
+        .await?;
         ch.queue_purge(&qname, QueuePurgeOptions::default()).await?;
     }
     drop(ch);
@@ -670,7 +679,10 @@ async fn run_sharded(
             let c = con_c.load(Ordering::Relaxed);
             eprint!(
                 "\r  pub: {} ({}/s)  con: {} ({}/s)    ",
-                p, p - last_pub, c, c - last_con
+                p,
+                p - last_pub,
+                c,
+                c - last_con
             );
             last_pub = p;
             last_con = c;
@@ -748,10 +760,9 @@ async fn run_native(
         let queue = format!("native-{i}");
 
         handles.push(tokio::spawn(async move {
-            let mut client =
-                rmq_native::client::NativeClient::connect(&addr, "guest", "guest")
-                    .await
-                    .unwrap();
+            let mut client = rmq_native::client::NativeClient::connect(&addr, "guest", "guest")
+                .await
+                .unwrap();
 
             let mut remaining = per_conn;
             while remaining > 0 {
@@ -759,10 +770,7 @@ async fn run_native(
                 let messages: Vec<bytes::Bytes> = (0..this_batch)
                     .map(|_| bytes::Bytes::copy_from_slice(&body))
                     .collect();
-                let confirmed = client
-                    .publish_batch(&queue, messages)
-                    .await
-                    .unwrap();
+                let confirmed = client.publish_batch(&queue, messages).await.unwrap();
                 published.fetch_add(confirmed as u64, Ordering::Relaxed);
                 remaining -= this_batch as u64;
             }

@@ -1,3 +1,26 @@
 /target
 /lavinmq
 .claude/worktrees/
+
+# Build artifacts
+*.swp
+*.swo
+*~
+
+# Test/bench output
+coverage.out
+*.profraw
+*.profdata
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Runtime data
+/tmp/
+*.log

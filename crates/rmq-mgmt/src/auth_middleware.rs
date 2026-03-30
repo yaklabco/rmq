@@ -1,4 +1,3 @@
-use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use base64::Engine;
@@ -8,10 +7,7 @@ use crate::state::AppState;
 
 /// Extract and validate Basic auth credentials from the request.
 /// Returns the authenticated username or an error response.
-pub fn authenticate_request(
-    headers: &HeaderMap,
-    state: &AppState,
-) -> Result<String, Response> {
+pub fn authenticate_request(headers: &HeaderMap, state: &AppState) -> Result<String, Response> {
     let auth_header = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())

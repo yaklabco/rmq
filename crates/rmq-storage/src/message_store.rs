@@ -31,7 +31,9 @@ struct SegmentIndex {
 
 impl SegmentIndex {
     fn new() -> Self {
-        Self { entries: Vec::new() }
+        Self {
+            entries: Vec::new(),
+        }
     }
 
     fn push(&mut self, position: u32, bytesize: u32) {
@@ -115,10 +117,10 @@ impl MessageStore {
         encode_message_to(msg, &mut self.encode_buf);
         let bytesize = self.encode_buf.len() as u32;
 
-        if let Some(ref seg) = self.write_segment {
-            if !seg.has_room(self.encode_buf.len()) {
-                self.rotate_segment()?;
-            }
+        if let Some(ref seg) = self.write_segment
+            && !seg.has_room(self.encode_buf.len())
+        {
+            self.rotate_segment()?;
         }
 
         if self.write_segment.is_none() {
@@ -146,7 +148,7 @@ impl MessageStore {
         let segment = self.get_read_segment(sp.segment)?;
         let data = segment
             .read(sp.position, sp.bytesize as usize)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "invalid segment position"))?;
+            .ok_or_else(|| io::Error::other("invalid segment position"))?;
 
         decode_message(data)
     }
@@ -255,10 +257,10 @@ impl MessageStore {
 
     fn get_read_segment(&mut self, segment_id: u32) -> io::Result<&MmapSegment> {
         // Check write segment first
-        if segment_id == self.write_segment_id {
-            if let Some(ref seg) = self.write_segment {
-                return Ok(seg);
-            }
+        if segment_id == self.write_segment_id
+            && let Some(ref seg) = self.write_segment
+        {
+            return Ok(seg);
         }
 
         if !self.read_segments.contains_key(&segment_id) {
@@ -301,7 +303,7 @@ impl MessageStore {
             // touching the mmap data at all
             if let Some(index) = self.segment_indices.get(&read_seg_id) {
                 let start_idx = index.find_from(read_pos);
-                let mut found = false;
+                let _found = false;
 
                 for &(pos, bytesize) in &index.entries[start_idx..] {
                     if self.is_acked(read_seg_id, pos) {
@@ -365,7 +367,9 @@ impl MessageStore {
             let data = self.read_segment_data(read_seg_id, read_pos, remaining)?;
             let data = match data {
                 Some(d) => d,
-                None => return Err(io::Error::new(io::ErrorKind::Other, "read past segment end")),
+                None => {
+                    return Err(io::Error::other("read past segment end"));
+                }
             };
 
             let msg_size = peek_message_size(&data)?;
@@ -411,7 +415,12 @@ impl MessageStore {
     }
 
     /// Read and copy segment data to a Vec to avoid borrow issues.
-    fn read_segment_data(&self, segment_id: u32, position: u32, len: usize) -> io::Result<Option<Vec<u8>>> {
+    fn read_segment_data(
+        &self,
+        segment_id: u32,
+        position: u32,
+        len: usize,
+    ) -> io::Result<Option<Vec<u8>>> {
         let seg = if segment_id == self.write_segment_id {
             self.write_segment.as_ref()
         } else {
@@ -432,10 +441,10 @@ impl MessageStore {
                 let entry = entry?;
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
-                if let Some(id_str) = name_str.strip_prefix("msgs.") {
-                    if let Ok(id) = id_str.parse::<u32>() {
-                        segment_ids.push(id);
-                    }
+                if let Some(id_str) = name_str.strip_prefix("msgs.")
+                    && let Ok(id) = id_str.parse::<u32>()
+                {
+                    segment_ids.push(id);
                 }
             }
         }
@@ -507,12 +516,6 @@ fn encode_message_to(msg: &StoredMessage, buf: &mut BytesMut) {
     buf.put_slice(&msg.body);
 }
 
-fn encode_message(msg: &StoredMessage) -> Vec<u8> {
-    let mut buf = BytesMut::with_capacity(msg.bytesize());
-    encode_message_to(msg, &mut buf);
-    buf.to_vec()
-}
-
 fn decode_message(data: &[u8]) -> io::Result<StoredMessage> {
     use bytes::Buf;
 
@@ -545,10 +548,7 @@ fn decode_message(data: &[u8]) -> io::Result<StoredMessage> {
     let bodysize = buf.get_u64() as usize;
 
     if buf.remaining() < bodysize {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "body truncated",
-        ));
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "body truncated"));
     }
     let body = buf.split_to(bodysize);
 

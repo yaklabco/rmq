@@ -99,12 +99,8 @@ impl MqttBroker {
         session: &mut Option<Session>,
     ) -> Vec<MqttPacket> {
         match packet {
-            MqttPacket::Connect(connect) => {
-                self.handle_connect(connect, session)
-            }
-            MqttPacket::Publish(publish) => {
-                self.handle_publish(publish, session).await
-            }
+            MqttPacket::Connect(connect) => self.handle_connect(connect, session),
+            MqttPacket::Publish(publish) => self.handle_publish(publish, session).await,
             MqttPacket::PubAck { packet_id } => {
                 if let Some(s) = session {
                     s.pending_acks.remove(&packet_id);
@@ -120,12 +116,8 @@ impl MqttBroker {
                 }
                 vec![]
             }
-            MqttPacket::Subscribe(sub) => {
-                self.handle_subscribe(sub, session)
-            }
-            MqttPacket::Unsubscribe(unsub) => {
-                self.handle_unsubscribe(unsub, session)
-            }
+            MqttPacket::Subscribe(sub) => self.handle_subscribe(sub, session),
+            MqttPacket::Unsubscribe(unsub) => self.handle_unsubscribe(unsub, session),
             MqttPacket::PingReq => vec![MqttPacket::PingResp],
             MqttPacket::Disconnect => vec![], // connection will close
             _ => vec![],
@@ -152,7 +144,10 @@ impl MqttBroker {
             })];
         }
 
-        info!("MQTT client '{}' connected (user: {username})", connect.client_id);
+        info!(
+            "MQTT client '{}' connected (user: {username})",
+            connect.client_id
+        );
 
         // Clean old session if exists
         let session_present = if connect.clean_session {
@@ -182,11 +177,8 @@ impl MqttBroker {
 
         // Store retained message
         if publish.retain {
-            self.retain_store.set(
-                publish.topic.clone(),
-                publish.payload.clone(),
-                publish.qos,
-            );
+            self.retain_store
+                .set(publish.topic.clone(), publish.payload.clone(), publish.qos);
         }
 
         // Publish to AMQP vhost via topic exchange
@@ -277,8 +269,7 @@ impl MqttBroker {
             for topic in &unsub.topics {
                 session.unsubscribe(topic);
                 // Remove the subscription queue
-                let queue_name =
-                    format!("mqtt.{}.{}", session.client_id, topic.replace('/', "."));
+                let queue_name = format!("mqtt.{}.{}", session.client_id, topic.replace('/', "."));
                 let _ = self.vhost.delete_queue(&queue_name);
             }
         }
@@ -291,11 +282,7 @@ impl MqttBroker {
     fn cleanup_session(&self, session: &Session) {
         // Remove all subscription queues
         for topic in session.subscriptions.keys() {
-            let queue_name = format!(
-                "mqtt.{}.{}",
-                session.client_id,
-                topic.replace('/', ".")
-            );
+            let queue_name = format!("mqtt.{}.{}", session.client_id, topic.replace('/', "."));
             let _ = self.vhost.delete_queue(&queue_name);
         }
         self.sessions.lock().remove(&session.client_id);
@@ -311,9 +298,8 @@ mod tests {
         let vhost_dir = dir.path().join("vhosts").join("default");
         let vhost = Arc::new(VHost::new("/".into(), &vhost_dir).unwrap());
         let users_path = dir.path().join("users.json");
-        let user_store = Arc::new(
-            UserStore::open_with_defaults(&users_path, "guest", "guest").unwrap(),
-        );
+        let user_store =
+            Arc::new(UserStore::open_with_defaults(&users_path, "guest", "guest").unwrap());
         (MqttBroker::new(vhost, user_store), dir)
     }
 
@@ -330,7 +316,9 @@ mod tests {
             will: None,
         };
 
-        let response = broker.handle_packet(MqttPacket::Connect(connect), &mut session).await;
+        let response = broker
+            .handle_packet(MqttPacket::Connect(connect), &mut session)
+            .await;
         assert_eq!(response.len(), 1);
         match &response[0] {
             MqttPacket::ConnAck(ack) => {
@@ -355,7 +343,9 @@ mod tests {
             will: None,
         };
 
-        let response = broker.handle_packet(MqttPacket::Connect(connect), &mut session).await;
+        let response = broker
+            .handle_packet(MqttPacket::Connect(connect), &mut session)
+            .await;
         match &response[0] {
             MqttPacket::ConnAck(ack) => assert_eq!(ack.return_code, 4),
             _ => panic!("expected ConnAck with error"),
@@ -376,7 +366,9 @@ mod tests {
             password: Some(Bytes::from_static(b"guest")),
             will: None,
         };
-        broker.handle_packet(MqttPacket::Connect(connect), &mut session).await;
+        broker
+            .handle_packet(MqttPacket::Connect(connect), &mut session)
+            .await;
 
         // Publish QoS 0
         let publish = PublishPacket {
@@ -387,7 +379,9 @@ mod tests {
             dup: false,
             payload: Bytes::from_static(b"hello"),
         };
-        let response = broker.handle_packet(MqttPacket::Publish(publish), &mut session).await;
+        let response = broker
+            .handle_packet(MqttPacket::Publish(publish), &mut session)
+            .await;
         assert!(response.is_empty()); // QoS 0 = no ack
     }
 
@@ -404,7 +398,9 @@ mod tests {
             password: Some(Bytes::from_static(b"guest")),
             will: None,
         };
-        broker.handle_packet(MqttPacket::Connect(connect), &mut session).await;
+        broker
+            .handle_packet(MqttPacket::Connect(connect), &mut session)
+            .await;
 
         let publish = PublishPacket {
             topic: "test/topic".into(),
@@ -414,7 +410,9 @@ mod tests {
             dup: false,
             payload: Bytes::from_static(b"hello"),
         };
-        let response = broker.handle_packet(MqttPacket::Publish(publish), &mut session).await;
+        let response = broker
+            .handle_packet(MqttPacket::Publish(publish), &mut session)
+            .await;
         assert_eq!(response.len(), 1);
         assert!(matches!(response[0], MqttPacket::PubAck { packet_id: 1 }));
     }
@@ -432,7 +430,9 @@ mod tests {
             password: Some(Bytes::from_static(b"guest")),
             will: None,
         };
-        broker.handle_packet(MqttPacket::Connect(connect), &mut session).await;
+        broker
+            .handle_packet(MqttPacket::Connect(connect), &mut session)
+            .await;
 
         let sub = SubscribePacket {
             packet_id: 1,
@@ -441,7 +441,9 @@ mod tests {
                 ("logs/#".into(), QoS::AtMostOnce),
             ],
         };
-        let response = broker.handle_packet(MqttPacket::Subscribe(sub), &mut session).await;
+        let response = broker
+            .handle_packet(MqttPacket::Subscribe(sub), &mut session)
+            .await;
         match &response[0] {
             MqttPacket::SubAck(ack) => {
                 assert_eq!(ack.packet_id, 1);
@@ -458,7 +460,9 @@ mod tests {
     async fn test_ping() {
         let (broker, _dir) = setup();
         let mut session = None;
-        let response = broker.handle_packet(MqttPacket::PingReq, &mut session).await;
+        let response = broker
+            .handle_packet(MqttPacket::PingReq, &mut session)
+            .await;
         assert_eq!(response, vec![MqttPacket::PingResp]);
     }
 
@@ -475,7 +479,9 @@ mod tests {
             password: Some(Bytes::from_static(b"guest")),
             will: None,
         };
-        broker.handle_packet(MqttPacket::Connect(connect), &mut session).await;
+        broker
+            .handle_packet(MqttPacket::Connect(connect), &mut session)
+            .await;
 
         // Publish retained message
         let publish = PublishPacket {
@@ -486,7 +492,9 @@ mod tests {
             dup: false,
             payload: Bytes::from_static(b"online"),
         };
-        broker.handle_packet(MqttPacket::Publish(publish), &mut session).await;
+        broker
+            .handle_packet(MqttPacket::Publish(publish), &mut session)
+            .await;
 
         // Verify retained
         let retained = broker.retain_store.matching("status/+");

@@ -83,19 +83,19 @@ impl User {
     /// Check if user can configure a resource in the given vhost.
     pub fn can_configure(&self, vhost: &str, resource: &str) -> bool {
         self.get_permissions(vhost)
-            .map_or(false, |p| p.can_configure(resource))
+            .is_some_and(|p| p.can_configure(resource))
     }
 
     /// Check if user can write to a resource in the given vhost.
     pub fn can_write(&self, vhost: &str, resource: &str) -> bool {
         self.get_permissions(vhost)
-            .map_or(false, |p| p.can_write(resource))
+            .is_some_and(|p| p.can_write(resource))
     }
 
     /// Check if user can read from a resource in the given vhost.
     pub fn can_read(&self, vhost: &str, resource: &str) -> bool {
         self.get_permissions(vhost)
-            .map_or(false, |p| p.can_read(resource))
+            .is_some_and(|p| p.can_read(resource))
     }
 }
 
@@ -121,13 +121,7 @@ mod tests {
 
     #[test]
     fn test_user_permissions() {
-        let mut user = User::new(
-            "testuser",
-            "pass",
-            HashAlgorithm::Plaintext,
-            vec![],
-        )
-        .unwrap();
+        let mut user = User::new("testuser", "pass", HashAlgorithm::Plaintext, vec![]).unwrap();
 
         // No permissions initially
         assert!(!user.can_write("/", "my-exchange"));
@@ -148,17 +142,12 @@ mod tests {
 
     #[test]
     fn test_change_password() {
-        let mut user = User::new(
-            "testuser",
-            "old-pass",
-            HashAlgorithm::Plaintext,
-            vec![],
-        )
-        .unwrap();
+        let mut user = User::new("testuser", "old-pass", HashAlgorithm::Plaintext, vec![]).unwrap();
 
         assert!(user.verify_password("old-pass").unwrap());
 
-        user.set_password("new-pass", HashAlgorithm::Sha256).unwrap();
+        user.set_password("new-pass", HashAlgorithm::Sha256)
+            .unwrap();
         assert!(!user.verify_password("old-pass").unwrap());
         assert!(user.verify_password("new-pass").unwrap());
     }

@@ -1,7 +1,7 @@
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, put};
+use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
@@ -265,7 +265,11 @@ async fn get_whoami(
 
     Ok(Json(WhoamiResponse {
         name: user.username,
-        tags: user.tags.iter().map(|t| format!("{t:?}").to_lowercase()).collect(),
+        tags: user
+            .tags
+            .iter()
+            .map(|t| format!("{t:?}").to_lowercase())
+            .collect(),
     }))
 }
 
@@ -500,7 +504,11 @@ async fn list_users(
         .into_iter()
         .filter_map(|name| {
             let user = state.user_store.get(&name)?;
-            let tags: Vec<String> = user.tags.iter().map(|t| format!("{t:?}").to_lowercase()).collect();
+            let tags: Vec<String> = user
+                .tags
+                .iter()
+                .map(|t| format!("{t:?}").to_lowercase())
+                .collect();
             Some(UserInfo {
                 name: user.username,
                 tags: tags.join(","),
@@ -522,7 +530,11 @@ async fn get_user(
         .get(&name)
         .ok_or_else(|| (StatusCode::NOT_FOUND, "User not found").into_response())?;
 
-    let tags: Vec<String> = user.tags.iter().map(|t| format!("{t:?}").to_lowercase()).collect();
+    let tags: Vec<String> = user
+        .tags
+        .iter()
+        .map(|t| format!("{t:?}").to_lowercase())
+        .collect();
     Ok(Json(UserInfo {
         name: user.username,
         tags: tags.join(","),
@@ -718,7 +730,11 @@ async fn export_definitions(
     let mut users = Vec::new();
     for name in state.user_store.list() {
         if let Some(u) = state.user_store.get(&name) {
-            let tags: Vec<String> = u.tags.iter().map(|t| format!("{t:?}").to_lowercase()).collect();
+            let tags: Vec<String> = u
+                .tags
+                .iter()
+                .map(|t| format!("{t:?}").to_lowercase())
+                .collect();
             users.push(UserDef {
                 name: u.username,
                 password_hash: u.password_hash.clone(),
@@ -784,9 +800,12 @@ async fn import_definitions(
     // Import bindings
     for b in defs.bindings {
         if b.destination_type == "queue" {
-            let _ = state
-                .vhost
-                .bind_queue(&b.destination, &b.source, &b.routing_key, &FieldTable::new());
+            let _ = state.vhost.bind_queue(
+                &b.destination,
+                &b.source,
+                &b.routing_key,
+                &FieldTable::new(),
+            );
         }
     }
 

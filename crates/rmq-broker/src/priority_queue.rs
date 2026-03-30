@@ -18,11 +18,7 @@ pub struct PriorityQueue {
 }
 
 impl PriorityQueue {
-    pub fn new(
-        config: QueueConfig,
-        max_priority: u8,
-        base_dir: &Path,
-    ) -> std::io::Result<Self> {
+    pub fn new(config: QueueConfig, max_priority: u8, base_dir: &Path) -> std::io::Result<Self> {
         let max_priority = max_priority.min(255);
         let mut sub_queues = Vec::with_capacity(max_priority as usize + 1);
 
@@ -56,12 +52,11 @@ impl PriorityQueue {
     }
 
     /// Publish a message. Routes to the sub-queue matching the message priority.
-    pub fn publish(&self, msg: &StoredMessage) -> std::io::Result<(PublishResult, Vec<DeadLetter>)> {
-        let priority = msg
-            .properties
-            .priority
-            .unwrap_or(0)
-            .min(self.max_priority);
+    pub fn publish(
+        &self,
+        msg: &StoredMessage,
+    ) -> std::io::Result<(PublishResult, Vec<DeadLetter>)> {
+        let priority = msg.properties.priority.unwrap_or(0).min(self.max_priority);
         self.sub_queues[priority as usize].publish(msg)
     }
 

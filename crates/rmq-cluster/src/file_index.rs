@@ -3,7 +3,9 @@ use std::path::PathBuf;
 
 use parking_lot::RwLock;
 
-use crate::checksums::{sha1_hex, sha1_bytes};
+use crate::checksums::sha1_bytes;
+#[cfg(test)]
+use crate::checksums::sha1_hex;
 
 /// Tracks files and their checksums for replication.
 pub struct FileIndex {
@@ -25,10 +27,13 @@ impl FileIndex {
     /// Register a file with its data.
     pub fn register(&self, path: PathBuf, data: &[u8]) {
         let checksum = sha1_bytes(data);
-        self.files.write().insert(path, FileEntry {
-            checksum,
-            size: data.len() as u64,
-        });
+        self.files.write().insert(
+            path,
+            FileEntry {
+                checksum,
+                size: data.len() as u64,
+            },
+        );
     }
 
     /// Update a file's checksum after append.
@@ -62,8 +67,7 @@ impl FileIndex {
     /// Find files that differ between this index and a remote's checksums.
     pub fn diff(&self, remote: &[(PathBuf, [u8; 20])]) -> SyncPlan {
         let local = self.files.read();
-        let remote_map: HashMap<&PathBuf, &[u8; 20]> =
-            remote.iter().map(|(p, h)| (p, h)).collect();
+        let remote_map: HashMap<&PathBuf, &[u8; 20]> = remote.iter().map(|(p, h)| (p, h)).collect();
 
         let mut to_send = Vec::new();
         let mut to_delete = Vec::new();
@@ -83,10 +87,7 @@ impl FileIndex {
             }
         }
 
-        SyncPlan {
-            to_send,
-            to_delete,
-        }
+        SyncPlan { to_send, to_delete }
     }
 
     pub fn file_count(&self) -> usize {

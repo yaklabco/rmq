@@ -66,10 +66,7 @@ impl MmapSegment {
     /// Note: does NOT fsync. Call `flush()` or `flush_async()` to ensure durability.
     pub fn append(&mut self, data: &[u8]) -> io::Result<u32> {
         if self.size + data.len() > self.capacity {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "segment capacity exceeded",
-            ));
+            return Err(io::Error::other("segment capacity exceeded"));
         }
         let pos = self.size as u32;
         self.mmap[self.size..self.size + data.len()].copy_from_slice(data);
@@ -134,7 +131,10 @@ impl MmapSegment {
     /// that have been fully consumed). Frees page cache.
     #[cfg(unix)]
     pub fn advise_dontneed(&self) -> io::Result<()> {
-        unsafe { self.mmap.unchecked_advise(memmap2::UncheckedAdvice::DontNeed)?; }
+        unsafe {
+            self.mmap
+                .unchecked_advise(memmap2::UncheckedAdvice::DontNeed)?;
+        }
         Ok(())
     }
 

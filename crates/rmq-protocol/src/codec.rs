@@ -202,7 +202,10 @@ mod tests {
 
         assert!(matches!(
             codec.decode(&mut buf),
-            Err(ProtocolError::FrameTooLarge { size: 200, max: 100 })
+            Err(ProtocolError::FrameTooLarge {
+                size: 200,
+                max: 100
+            })
         ));
     }
 }

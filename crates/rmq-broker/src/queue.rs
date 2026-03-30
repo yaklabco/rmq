@@ -113,7 +113,8 @@ impl Queue {
             if msg_count > 0 {
                 tracing::debug!(
                     "queue '{}': {} messages available in store for recovery",
-                    config.name, msg_count
+                    config.name,
+                    msg_count
                 );
             }
             let queue = Self {
@@ -164,7 +165,10 @@ impl Queue {
     /// Publish a message.
     /// 1. Persist to mmap store (under lock) — guarantees durability.
     /// 2. Push Envelope to fast-path channel for consumer delivery.
-    pub fn publish(&self, msg: &StoredMessage) -> std::io::Result<(PublishResult, Vec<DeadLetter>)> {
+    pub fn publish(
+        &self,
+        msg: &StoredMessage,
+    ) -> std::io::Result<(PublishResult, Vec<DeadLetter>)> {
         let mut store = self.store.lock();
         let mut dead_letters = Vec::new();
 
@@ -294,9 +298,9 @@ impl Queue {
             // Track this position so the store fallback skips it.
             // Don't ack in the store yet — the consumer hasn't acked.
             // If the consumer disconnects, ServerChannel::Drop requeues it.
-            self.channel_delivered.lock().insert(
-                (env.segment_position.segment, env.segment_position.position),
-            );
+            self.channel_delivered
+                .lock()
+                .insert((env.segment_position.segment, env.segment_position.position));
             return Ok((Some(env), vec![]));
         }
 
@@ -309,9 +313,9 @@ impl Queue {
             match store.shift()? {
                 Some(env) => {
                     // If already delivered via channel, ack to advance past it
-                    if delivered_snapshot.contains(
-                        &(env.segment_position.segment, env.segment_position.position),
-                    ) {
+                    if delivered_snapshot
+                        .contains(&(env.segment_position.segment, env.segment_position.position))
+                    {
                         store.ack(&env.segment_position)?;
                         continue;
                     }
@@ -331,10 +335,7 @@ impl Queue {
 
     /// Consume up to `max` messages. Fast-path channel first, then store fallback.
     /// Uses a single store lock acquisition for all ack + shift operations.
-    pub fn shift_batch(
-        &self,
-        max: usize,
-    ) -> std::io::Result<(Vec<Envelope>, Vec<DeadLetter>)> {
+    pub fn shift_batch(&self, max: usize) -> std::io::Result<(Vec<Envelope>, Vec<DeadLetter>)> {
         let now = now_millis();
         let mut envelopes = Vec::with_capacity(max);
         let mut dead_letters = Vec::new();
@@ -438,7 +439,9 @@ impl Queue {
     }
 
     pub fn ack(&self, sp: &SegmentPosition) -> std::io::Result<()> {
-        self.channel_delivered.lock().remove(&(sp.segment, sp.position));
+        self.channel_delivered
+            .lock()
+            .remove(&(sp.segment, sp.position));
         self.store.lock().ack(sp)
     }
 
@@ -683,7 +686,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mut args = FieldTable::new();
         args.insert("x-max-length", FieldValue::I32(2));
-        args.insert("x-overflow", FieldValue::ShortString("reject-publish".into()));
+        args.insert(
+            "x-overflow",
+            FieldValue::ShortString("reject-publish".into()),
+        );
         let queue = make_queue_with_args(dir.path(), args);
 
         queue.publish(&make_msg("first")).unwrap();
@@ -697,8 +703,14 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mut args = FieldTable::new();
         args.insert("x-max-length", FieldValue::I32(1));
-        args.insert("x-dead-letter-exchange", FieldValue::ShortString("dlx".into()));
-        args.insert("x-dead-letter-routing-key", FieldValue::ShortString("dead".into()));
+        args.insert(
+            "x-dead-letter-exchange",
+            FieldValue::ShortString("dlx".into()),
+        );
+        args.insert(
+            "x-dead-letter-routing-key",
+            FieldValue::ShortString("dead".into()),
+        );
         let queue = make_queue_with_args(dir.path(), args);
 
         queue.publish(&make_msg("first")).unwrap();
@@ -756,7 +768,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mut args = FieldTable::new();
         args.insert("x-message-ttl", FieldValue::I32(1));
-        args.insert("x-dead-letter-exchange", FieldValue::ShortString("dlx".into()));
+        args.insert(
+            "x-dead-letter-exchange",
+            FieldValue::ShortString("dlx".into()),
+        );
         let queue = make_queue_with_args(dir.path(), args);
 
         let mut msg = make_msg("dead-on-expiry");

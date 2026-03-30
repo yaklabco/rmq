@@ -12,17 +12,13 @@ pub enum PasswordError {
 /// Supported password hashing algorithms.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum HashAlgorithm {
+    #[default]
     Bcrypt,
     Sha256,
     Sha512,
     Plaintext,
-}
-
-impl Default for HashAlgorithm {
-    fn default() -> Self {
-        Self::Bcrypt
-    }
 }
 
 /// Hash a password with the given algorithm.
@@ -71,11 +67,7 @@ pub fn verify_password(
 // Small hex encoding helper (avoid adding another dependency)
 mod hex {
     pub fn encode(bytes: impl AsRef<[u8]>) -> String {
-        bytes
-            .as_ref()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect()
+        bytes.as_ref().iter().map(|b| format!("{b:02x}")).collect()
     }
 }
 

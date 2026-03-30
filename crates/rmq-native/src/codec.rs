@@ -16,13 +16,30 @@ pub const FRAME_DISCONNECT: u8 = 0x08;
 /// A native protocol frame.
 #[derive(Debug, Clone)]
 pub enum NativeFrame {
-    Auth { username: String, password: String },
+    Auth {
+        username: String,
+        password: String,
+    },
     AuthOk,
-    Publish { queue: String, messages: Vec<Bytes> },
-    PublishOk { count: u32 },
-    Consume { queue: String, batch_size: u32, prefetch: u32 },
-    Deliver { batch_id: u64, messages: Vec<Bytes> },
-    Ack { batch_id: u64 },
+    Publish {
+        queue: String,
+        messages: Vec<Bytes>,
+    },
+    PublishOk {
+        count: u32,
+    },
+    Consume {
+        queue: String,
+        batch_size: u32,
+        prefetch: u32,
+    },
+    Deliver {
+        batch_id: u64,
+        messages: Vec<Bytes>,
+    },
+    Ack {
+        batch_id: u64,
+    },
     Disconnect,
 }
 
@@ -60,7 +77,11 @@ impl NativeFrame {
                 buf.put_u32(4);
                 buf.put_u32(*count);
             }
-            Self::Consume { queue, batch_size, prefetch } => {
+            Self::Consume {
+                queue,
+                batch_size,
+                prefetch,
+            } => {
                 let payload_len = 2 + queue.len() + 4 + 4;
                 buf.put_u8(FRAME_CONSUME);
                 buf.put_u32(payload_len as u32);
@@ -133,7 +154,11 @@ impl NativeFrame {
                 let queue = get_str(&mut payload)?;
                 let batch_size = payload.get_u32();
                 let prefetch = payload.get_u32();
-                Some(Self::Consume { queue, batch_size, prefetch })
+                Some(Self::Consume {
+                    queue,
+                    batch_size,
+                    prefetch,
+                })
             }
             FRAME_DELIVER => {
                 let batch_id = payload.get_u64();

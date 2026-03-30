@@ -238,8 +238,8 @@ struct TopicPattern {
 #[derive(Debug, Clone, PartialEq)]
 enum TopicSegment {
     Exact(String),
-    Star,  // * — matches exactly one word
-    Hash,  // # — matches zero or more words
+    Star, // * — matches exactly one word
+    Hash, // # — matches zero or more words
 }
 
 impl TopicPattern {
@@ -332,13 +332,18 @@ impl Exchange for TopicExchange {
     fn bind(&mut self, destination: Destination, routing_key: &str, _arguments: &FieldTable) {
         let pattern = TopicPattern::compile(routing_key);
         // Avoid duplicate bindings
-        if !self.bindings.iter().any(|(p, d)| p.original == routing_key && d == &destination) {
+        if !self
+            .bindings
+            .iter()
+            .any(|(p, d)| p.original == routing_key && d == &destination)
+        {
             self.bindings.push((pattern, destination));
         }
     }
 
     fn unbind(&mut self, destination: &Destination, routing_key: &str, _arguments: &FieldTable) {
-        self.bindings.retain(|(p, d)| !(p.original == routing_key && d == destination));
+        self.bindings
+            .retain(|(p, d)| !(p.original == routing_key && d == destination));
     }
 
     fn route(&self, routing_key: &str, _headers: Option<&FieldTable>) -> Vec<Destination> {
@@ -418,7 +423,8 @@ impl Exchange for HeadersExchange {
     fn unbind(&mut self, destination: &Destination, _routing_key: &str, arguments: &FieldTable) {
         let mut match_args = arguments.clone();
         match_args.0.remove("x-match");
-        self.bindings.retain(|(args, d, _)| !(args == &match_args && d == destination));
+        self.bindings
+            .retain(|(args, d, _)| !(args == &match_args && d == destination));
     }
 
     fn route(&self, _routing_key: &str, headers: Option<&FieldTable>) -> Vec<Destination> {
@@ -434,16 +440,14 @@ impl Exchange for HeadersExchange {
             }
 
             let matched = match mode {
-                HeadersMatchMode::All => {
-                    bind_args.0.iter().all(|(key, value)| {
-                        headers.get(key).map_or(false, |v| v == value)
-                    })
-                }
-                HeadersMatchMode::Any => {
-                    bind_args.0.iter().any(|(key, value)| {
-                        headers.get(key).map_or(false, |v| v == value)
-                    })
-                }
+                HeadersMatchMode::All => bind_args
+                    .0
+                    .iter()
+                    .all(|(key, value)| headers.get(key).map_or(false, |v| v == value)),
+                HeadersMatchMode::Any => bind_args
+                    .0
+                    .iter()
+                    .any(|(key, value)| headers.get(key).map_or(false, |v| v == value)),
             };
 
             if matched {
@@ -485,16 +489,8 @@ mod tests {
         };
         let mut exchange = DirectExchange::new(config);
 
-        exchange.bind(
-            Destination::Queue("q1".into()),
-            "key1",
-            &FieldTable::new(),
-        );
-        exchange.bind(
-            Destination::Queue("q2".into()),
-            "key2",
-            &FieldTable::new(),
-        );
+        exchange.bind(Destination::Queue("q1".into()), "key1", &FieldTable::new());
+        exchange.bind(Destination::Queue("q2".into()), "key2", &FieldTable::new());
 
         let result = exchange.route("key1", None);
         assert_eq!(result.len(), 1);
@@ -520,16 +516,8 @@ mod tests {
         };
         let mut exchange = DirectExchange::new(config);
 
-        exchange.bind(
-            Destination::Queue("q1".into()),
-            "key",
-            &FieldTable::new(),
-        );
-        exchange.bind(
-            Destination::Queue("q2".into()),
-            "key",
-            &FieldTable::new(),
-        );
+        exchange.bind(Destination::Queue("q1".into()), "key", &FieldTable::new());
+        exchange.bind(Destination::Queue("q2".into()), "key", &FieldTable::new());
 
         let result = exchange.route("key", None);
         assert_eq!(result.len(), 2);
@@ -599,7 +587,11 @@ mod tests {
     #[test]
     fn test_topic_exact_match() {
         let mut ex = topic_exchange();
-        ex.bind(Destination::Queue("q1".into()), "stock.usd.nyse", &FieldTable::new());
+        ex.bind(
+            Destination::Queue("q1".into()),
+            "stock.usd.nyse",
+            &FieldTable::new(),
+        );
 
         assert_eq!(ex.route("stock.usd.nyse", None).len(), 1);
         assert!(ex.route("stock.usd.nasdaq", None).is_empty());
@@ -609,7 +601,11 @@ mod tests {
     #[test]
     fn test_topic_star_wildcard() {
         let mut ex = topic_exchange();
-        ex.bind(Destination::Queue("q1".into()), "stock.*.nyse", &FieldTable::new());
+        ex.bind(
+            Destination::Queue("q1".into()),
+            "stock.*.nyse",
+            &FieldTable::new(),
+        );
 
         assert_eq!(ex.route("stock.usd.nyse", None).len(), 1);
         assert_eq!(ex.route("stock.eur.nyse", None).len(), 1);
@@ -621,7 +617,11 @@ mod tests {
     #[test]
     fn test_topic_hash_wildcard() {
         let mut ex = topic_exchange();
-        ex.bind(Destination::Queue("q1".into()), "stock.#", &FieldTable::new());
+        ex.bind(
+            Destination::Queue("q1".into()),
+            "stock.#",
+            &FieldTable::new(),
+        );
 
         assert_eq!(ex.route("stock.usd.nyse", None).len(), 1);
         assert_eq!(ex.route("stock.eur", None).len(), 1);
@@ -632,7 +632,11 @@ mod tests {
     #[test]
     fn test_topic_hash_in_middle() {
         let mut ex = topic_exchange();
-        ex.bind(Destination::Queue("q1".into()), "stock.#.nyse", &FieldTable::new());
+        ex.bind(
+            Destination::Queue("q1".into()),
+            "stock.#.nyse",
+            &FieldTable::new(),
+        );
 
         assert_eq!(ex.route("stock.nyse", None).len(), 1); // # matches zero
         assert_eq!(ex.route("stock.usd.nyse", None).len(), 1); // # matches one
@@ -653,8 +657,16 @@ mod tests {
     #[test]
     fn test_topic_multiple_bindings() {
         let mut ex = topic_exchange();
-        ex.bind(Destination::Queue("q1".into()), "stock.*", &FieldTable::new());
-        ex.bind(Destination::Queue("q2".into()), "stock.usd", &FieldTable::new());
+        ex.bind(
+            Destination::Queue("q1".into()),
+            "stock.*",
+            &FieldTable::new(),
+        );
+        ex.bind(
+            Destination::Queue("q2".into()),
+            "stock.usd",
+            &FieldTable::new(),
+        );
 
         // Both should match
         let result = ex.route("stock.usd", None);
@@ -664,18 +676,34 @@ mod tests {
     #[test]
     fn test_topic_no_duplicate_bindings() {
         let mut ex = topic_exchange();
-        ex.bind(Destination::Queue("q1".into()), "stock.*", &FieldTable::new());
-        ex.bind(Destination::Queue("q1".into()), "stock.*", &FieldTable::new());
+        ex.bind(
+            Destination::Queue("q1".into()),
+            "stock.*",
+            &FieldTable::new(),
+        );
+        ex.bind(
+            Destination::Queue("q1".into()),
+            "stock.*",
+            &FieldTable::new(),
+        );
         assert_eq!(ex.binding_count(), 1);
     }
 
     #[test]
     fn test_topic_unbind() {
         let mut ex = topic_exchange();
-        ex.bind(Destination::Queue("q1".into()), "stock.*", &FieldTable::new());
+        ex.bind(
+            Destination::Queue("q1".into()),
+            "stock.*",
+            &FieldTable::new(),
+        );
         assert_eq!(ex.binding_count(), 1);
 
-        ex.unbind(&Destination::Queue("q1".into()), "stock.*", &FieldTable::new());
+        ex.unbind(
+            &Destination::Queue("q1".into()),
+            "stock.*",
+            &FieldTable::new(),
+        );
         assert_eq!(ex.binding_count(), 0);
     }
 
