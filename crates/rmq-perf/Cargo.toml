@@ -17,3 +17,4 @@ tracing-subscriber = { workspace = true }
 futures-lite = "2"
 rmq-native = { workspace = true }
 bytes = { workspace = true }
+anyhow = { workspace = true }
