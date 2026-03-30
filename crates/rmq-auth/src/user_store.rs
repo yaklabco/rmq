@@ -102,26 +102,26 @@ impl UserStore {
         algorithm: HashAlgorithm,
         tags: Vec<UserTag>,
     ) -> Result<(), UserStoreError> {
-        let mut users = self.users.write();
+        let users = self.users.write();
         if users.contains_key(username) {
             return Err(UserStoreError::AlreadyExists(username.to_string()));
         }
         let user = User::new(username, password, algorithm, tags)?;
-        users.insert(username.to_string(), user);
-        drop(users);
-        self.save()?;
-        Ok(())
+        // Hold the write lock through save to prevent TOCTOU races.
+        self.save_with_mutation(users, |u| {
+            u.insert(username.to_string(), user);
+        })
     }
 
     /// Delete a user.
     pub fn delete(&self, username: &str) -> Result<(), UserStoreError> {
-        let mut users = self.users.write();
-        if users.remove(username).is_none() {
+        let users = self.users.write();
+        if !users.contains_key(username) {
             return Err(UserStoreError::NotFound(username.to_string()));
         }
-        drop(users);
-        self.save()?;
-        Ok(())
+        self.save_with_mutation(users, |u| {
+            u.remove(username);
+        })
     }
 
     /// Set permissions for a user on a vhost.
@@ -131,14 +131,15 @@ impl UserStore {
         vhost: &str,
         permission: Permission,
     ) -> Result<(), UserStoreError> {
-        let mut users = self.users.write();
-        let user = users
-            .get_mut(username)
-            .ok_or_else(|| UserStoreError::NotFound(username.to_string()))?;
-        user.set_permissions(vhost, permission);
-        drop(users);
-        self.save()?;
-        Ok(())
+        let users = self.users.write();
+        if !users.contains_key(username) {
+            return Err(UserStoreError::NotFound(username.to_string()));
+        }
+        self.save_with_mutation(users, |u| {
+            if let Some(user) = u.get_mut(username) {
+                user.set_permissions(vhost, permission);
+            }
+        })
     }
 
     /// Change a user's password.
@@ -148,25 +149,57 @@ impl UserStore {
         password: &str,
         algorithm: HashAlgorithm,
     ) -> Result<(), UserStoreError> {
-        let mut users = self.users.write();
-        let user = users
-            .get_mut(username)
-            .ok_or_else(|| UserStoreError::NotFound(username.to_string()))?;
-        user.set_password(password, algorithm)?;
-        drop(users);
-        self.save()?;
-        Ok(())
+        let users = self.users.write();
+        if !users.contains_key(username) {
+            return Err(UserStoreError::NotFound(username.to_string()));
+        }
+        // set_password can fail, so we do it inside the lock but before save
+        self.save_with_mutation_fallible(users, |u| {
+            let user = u
+                .get_mut(username)
+                .ok_or_else(|| UserStoreError::NotFound(username.to_string()))?;
+            user.set_password(password, algorithm)?;
+            Ok(())
+        })
     }
 
-    /// Persist users to disk.
-    fn save(&self) -> Result<(), UserStoreError> {
-        let users = self.users.read();
-        let data = serde_json::to_string_pretty(&*users)?;
-        // Write atomically via temp file
-        let tmp = self.path.with_extension("tmp");
+    /// Apply a mutation under the write lock, then persist atomically.
+    /// The write lock is held through the entire save operation.
+    fn save_with_mutation(
+        &self,
+        mut users: parking_lot::RwLockWriteGuard<'_, HashMap<String, User>>,
+        mutate: impl FnOnce(&mut HashMap<String, User>),
+    ) -> Result<(), UserStoreError> {
+        mutate(&mut users);
+        self.persist(&users)
+    }
+
+    /// Like `save_with_mutation` but the mutation itself can fail.
+    fn save_with_mutation_fallible(
+        &self,
+        mut users: parking_lot::RwLockWriteGuard<'_, HashMap<String, User>>,
+        mutate: impl FnOnce(&mut HashMap<String, User>) -> Result<(), UserStoreError>,
+    ) -> Result<(), UserStoreError> {
+        mutate(&mut users)?;
+        self.persist(&users)
+    }
+
+    /// Persist users to disk atomically via a uniquely-named temp file.
+    /// Caller must hold whatever lock is appropriate.
+    fn persist(&self, users: &HashMap<String, User>) -> Result<(), UserStoreError> {
+        let data = serde_json::to_string_pretty(users)?;
+        let pid = std::process::id();
+        let tmp = self.path.with_extension(format!("tmp.{pid}"));
         std::fs::write(&tmp, &data)?;
         std::fs::rename(&tmp, &self.path)?;
         Ok(())
+    }
+
+    /// Persist users to disk (acquires read lock internally).
+    /// Used only during initialization paths where no write lock is held.
+    fn save(&self) -> Result<(), UserStoreError> {
+        let users = self.users.read();
+        self.persist(&users)
     }
 }
 
@@ -256,15 +289,7 @@ mod tests {
             .unwrap();
 
         store
-            .set_permissions(
-                "alice",
-                "/",
-                Permission {
-                    configure: "my-.*".to_string(),
-                    write: "my-.*".to_string(),
-                    read: ".*".to_string(),
-                },
-            )
+            .set_permissions("alice", "/", Permission::new("my-.*", "my-.*", ".*"))
             .unwrap();
 
         let user = store.get("alice").unwrap();

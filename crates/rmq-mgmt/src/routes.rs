@@ -655,11 +655,7 @@ async fn set_permissions(
         .set_permissions(
             &user,
             "/",
-            Permission {
-                configure: body.configure,
-                write: body.write,
-                read: body.read,
-            },
+            Permission::new(body.configure, body.write, body.read),
         )
         .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()).into_response())?;
 
