@@ -2114,6 +2114,7 @@ dependencies = [
  "rmq-mqtt",
  "rmq-native",
  "rmq-server",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
