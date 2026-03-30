@@ -2,6 +2,7 @@
 name = "rmq-protocol"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 bytes = { workspace = true }

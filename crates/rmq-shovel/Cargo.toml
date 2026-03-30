@@ -2,6 +2,7 @@
 name = "rmq-shovel"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 rmq-broker = { workspace = true }

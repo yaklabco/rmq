@@ -1,0 +1,7 @@
+target/
+lavinmq/
+.claude/
+.git/
+*.md
+LICENSE
+docs/

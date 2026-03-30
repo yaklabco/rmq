@@ -1,0 +1,154 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  check-version:
+    name: Check for version bump
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.detect.outputs.version }}
+      release_notes: ${{ steps.detect.outputs.release_notes }}
+      should_release: ${{ steps.detect.outputs.should_release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect version from CHANGELOG
+        id: detect
+        run: |
+          # Extract first versioned heading: ## [x.y.z]
+          VERSION=$(grep -m1 '^## \[[0-9]' CHANGELOG.md | sed 's/## \[\(.*\)\].*/\1/')
+
+          if [ -z "$VERSION" ]; then
+            echo "No versioned release found in CHANGELOG.md"
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Check if tag already exists
+          if git rev-parse "v$VERSION" >/dev/null 2>&1; then
+            echo "Tag v$VERSION already exists, skipping"
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "New version detected: $VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "should_release=true" >> "$GITHUB_OUTPUT"
+
+          # Extract release notes (content between this version and next heading)
+          NOTES=$(awk "/^## \[$VERSION\]/{found=1; next} /^## \[/{if(found) exit} found" CHANGELOG.md)
+          # Escape for multiline output
+          {
+            echo "release_notes<<NOTES_EOF"
+            echo "$NOTES"
+            echo "NOTES_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+  create-tag:
+    name: Create tag
+    needs: check-version
+    if: needs.check-version.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create and push tag
+        run: |
+          git tag "v${{ needs.check-version.outputs.version }}"
+          git push origin "v${{ needs.check-version.outputs.version }}"
+
+  build:
+    name: Build (${{ matrix.name }})
+    needs: [check-version, create-tag]
+    if: needs.check-version.outputs.should_release == 'true'
+    strategy:
+      matrix:
+        include:
+          - name: Linux x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: rmq-x86_64-linux
+            cross: false
+          - name: Linux aarch64
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact: rmq-aarch64-linux
+            cross: true
+          - name: macOS aarch64
+            os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: rmq-aarch64-darwin
+            cross: false
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install zigbuild
+        if: matrix.cross
+        run: |
+          pip3 install ziglang
+          cargo install cargo-zigbuild
+
+      - name: Build (native)
+        if: "!matrix.cross"
+        run: cargo build --release --target ${{ matrix.target }} -p rmq -p rmq-perf
+
+      - name: Build (cross)
+        if: matrix.cross
+        run: cargo zigbuild --release --target ${{ matrix.target }} -p rmq -p rmq-perf
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/rmq dist/
+          cp target/${{ matrix.target }}/release/rmq-perf dist/
+          cd dist && tar czf ../${{ matrix.artifact }}.tar.gz *
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.tar.gz
+
+  release:
+    name: Create GitHub Release
+    needs: [check-version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          find . -name '*.tar.gz' -exec sha256sum {} \; > checksums.txt
+          cat checksums.txt
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.check-version.outputs.version }}
+          name: RMQ v${{ needs.check-version.outputs.version }}
+          body: ${{ needs.check-version.outputs.release_notes }}
+          files: |
+            artifacts/**/*.tar.gz
+            artifacts/checksums.txt
+
+  docker:
+    name: Docker Image
+    needs: [check-version, create-tag]
+    if: needs.check-version.outputs.should_release == 'true'
+    uses: ./.github/workflows/docker.yml
+    with:
+      version: ${{ needs.check-version.outputs.version }}

@@ -1,0 +1,124 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: >
+          cargo clippy --workspace --all-targets --
+          -A clippy::approx_constant
+          -A clippy::module_name_repetitions
+          -A clippy::must_use_candidate
+          -A clippy::missing_errors_doc
+          -A clippy::missing_panics_doc
+          -A clippy::too_many_lines
+          -A clippy::wildcard_imports
+          -A clippy::large_enum_variant
+          -A clippy::ptr_arg
+          -A dead-code
+          -A clippy::absurd_extreme_comparisons
+          -A clippy::new_without_default
+          -A clippy::option_map_or_none
+          -A clippy::derivable_impls
+          -A clippy::match_like_matches_macro
+          -A clippy::manual_is_variant_and
+          -A clippy::needless_return
+          -A clippy::collapsible_if
+          -A clippy::explicit_auto_deref
+          -A clippy::unnecessary_map_or
+          -A clippy::unnecessary_min_or_max
+          -A clippy::result_large_err
+          -A clippy::redundant_pattern_matching
+          -A clippy::while_let_loop
+          -A clippy::io_other_error
+          -A clippy::len_zero
+          -A unused-imports
+          -A unused-variables
+
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+
+  build-linux-x64:
+    name: Build (Linux x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p rmq -p rmq-perf
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rmq-x86_64-linux
+          path: |
+            target/release/rmq
+            target/release/rmq-perf
+
+  build-linux-arm:
+    name: Build (Linux aarch64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+      - uses: mlugg/setup-zig@v2
+      - run: cargo install cargo-zigbuild
+      - run: cargo zigbuild --release --target aarch64-unknown-linux-gnu -p rmq -p rmq-perf
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rmq-aarch64-linux
+          path: |
+            target/aarch64-unknown-linux-gnu/release/rmq
+            target/aarch64-unknown-linux-gnu/release/rmq-perf
+
+  build-macos:
+    name: Build (macOS aarch64)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p rmq -p rmq-perf
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rmq-aarch64-darwin
+          path: |
+            target/release/rmq
+            target/release/rmq-perf

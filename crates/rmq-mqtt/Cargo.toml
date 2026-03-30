@@ -2,6 +2,7 @@
 name = "rmq-mqtt"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 rmq-auth = { workspace = true }

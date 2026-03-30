@@ -1,0 +1,181 @@
+name: Benchmark
+
+on:
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  benchmark:
+    name: Benchmark Regression Gate
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@v4
+        with:
+          path: pr
+
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: main
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Build and benchmark main (baseline)
+      - name: Build main
+        working-directory: main
+        run: cargo build --release -p rmq -p rmq-perf
+
+      - name: Benchmark main
+        working-directory: main
+        run: |
+          rm -rf /tmp/rmq-bench-main
+          ./target/release/rmq -d /tmp/rmq-bench-main -b 127.0.0.1:5672 \
+            --mgmt-bind 127.0.0.1:15672 --mqtt-bind 127.0.0.1:1883 \
+            --native-bind 127.0.0.1:5680 &
+          sleep 2
+
+          for run in 1 2 3; do
+            echo "=== Main run $run ===" >> /tmp/main-bench.txt
+            ./target/release/rmq-perf publish -n 500000 --size 128 \
+              --publishers 4 --persistent --routing-key bench-q 2>&1 \
+              | tee -a /tmp/main-bench.txt
+            ./target/release/rmq-perf throughput -n 500000 --size 128 \
+              --publishers 4 --consumers 4 --prefetch 500 2>&1 \
+              | tee -a /tmp/main-bench.txt
+          done
+
+          kill $(pgrep -f "target/release/rmq -d") 2>/dev/null || true
+          rm -rf /tmp/rmq-bench-main
+
+      # Build and benchmark PR
+      - name: Build PR
+        working-directory: pr
+        run: cargo build --release -p rmq -p rmq-perf
+
+      - name: Benchmark PR
+        working-directory: pr
+        run: |
+          rm -rf /tmp/rmq-bench-pr
+          ./target/release/rmq -d /tmp/rmq-bench-pr -b 127.0.0.1:5672 \
+            --mgmt-bind 127.0.0.1:15672 --mqtt-bind 127.0.0.1:1883 \
+            --native-bind 127.0.0.1:5680 &
+          sleep 2
+
+          for run in 1 2 3; do
+            echo "=== PR run $run ===" >> /tmp/pr-bench.txt
+            ./target/release/rmq-perf publish -n 500000 --size 128 \
+              --publishers 4 --persistent --routing-key bench-q 2>&1 \
+              | tee -a /tmp/pr-bench.txt
+            ./target/release/rmq-perf throughput -n 500000 --size 128 \
+              --publishers 4 --consumers 4 --prefetch 500 2>&1 \
+              | tee -a /tmp/pr-bench.txt
+          done
+
+          kill $(pgrep -f "target/release/rmq -d") 2>/dev/null || true
+          rm -rf /tmp/rmq-bench-pr
+
+      # Compare results
+      - name: Compare benchmarks
+        id: compare
+        run: |
+          extract_median_rate() {
+            local file=$1 label=$2
+            grep "Rate:" "$file" | grep -v "Throughput" | \
+              awk '{print $2}' | sort -n | sed -n '2p'
+          }
+
+          # Extract publish rates (median of 3 runs)
+          MAIN_PUB=$(grep "Rate:" /tmp/main-bench.txt | head -3 | awk '{print $2}' | sort -n | sed -n '2p')
+          PR_PUB=$(grep "Rate:" /tmp/pr-bench.txt | head -3 | awk '{print $2}' | sort -n | sed -n '2p')
+
+          # Extract E2E rates (Published line from throughput test)
+          MAIN_E2E=$(grep "Published:" /tmp/main-bench.txt | awk -F'[()]' '{print $2}' | awk '{print $1}' | sort -n | sed -n '2p')
+          PR_E2E=$(grep "Published:" /tmp/pr-bench.txt | awk -F'[()]' '{print $2}' | awk '{print $1}' | sort -n | sed -n '2p')
+
+          # Calculate deltas
+          calc_delta() {
+            local main=$1 pr=$2
+            if [ -z "$main" ] || [ "$main" = "0" ]; then echo "N/A"; return; fi
+            echo "$pr $main" | awk '{printf "%.1f", ($1 - $2) / $2 * 100}'
+          }
+
+          PUB_DELTA=$(calc_delta "$MAIN_PUB" "$PR_PUB")
+          E2E_DELTA=$(calc_delta "$MAIN_E2E" "$PR_E2E")
+
+          echo "main_pub=$MAIN_PUB" >> "$GITHUB_OUTPUT"
+          echo "pr_pub=$PR_PUB" >> "$GITHUB_OUTPUT"
+          echo "pub_delta=$PUB_DELTA" >> "$GITHUB_OUTPUT"
+          echo "main_e2e=$MAIN_E2E" >> "$GITHUB_OUTPUT"
+          echo "pr_e2e=$PR_E2E" >> "$GITHUB_OUTPUT"
+          echo "e2e_delta=$E2E_DELTA" >> "$GITHUB_OUTPUT"
+
+          # Check for regression >10%
+          FAILED=false
+          for delta in "$PUB_DELTA" "$E2E_DELTA"; do
+            if [ "$delta" != "N/A" ]; then
+              REGRESSED=$(echo "$delta" | awk '{print ($1 < -10) ? "true" : "false"}')
+              if [ "$REGRESSED" = "true" ]; then
+                FAILED=true
+              fi
+            fi
+          done
+          echo "failed=$FAILED" >> "$GITHUB_OUTPUT"
+
+      - name: Post benchmark comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { main_pub, pr_pub, pub_delta, main_e2e, pr_e2e, e2e_delta, failed } = ${{ toJson(steps.compare.outputs) }};
+            const icon = (d) => {
+              if (d === 'N/A') return '?';
+              const n = parseFloat(d);
+              if (n < -10) return '🔴';
+              if (n < -5) return '🟡';
+              return '🟢';
+            };
+            const body = `## Benchmark Results
+
+            | Metric | main | PR | Delta | Status |
+            |--------|------|-----|-------|--------|
+            | Publish 4p (msg/s) | ${main_pub} | ${pr_pub} | ${pub_delta}% | ${icon(pub_delta)} |
+            | E2E 4p/4c (msg/s) | ${main_e2e} | ${pr_e2e} | ${e2e_delta}% | ${icon(e2e_delta)} |
+
+            ${failed === 'true' ? '**🔴 FAILED: >10% regression detected. This PR cannot be merged.**' : '**🟢 PASSED: No significant regression.**'}
+
+            _Median of 3 runs. Threshold: -10%._`;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.body.includes('## Benchmark Results'));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+      - name: Fail on regression
+        if: steps.compare.outputs.failed == 'true'
+        run: |
+          echo "::error::Benchmark regression >10% detected"
+          exit 1
