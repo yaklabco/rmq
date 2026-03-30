@@ -195,7 +195,9 @@ impl MqttBroker {
             body: publish.payload.clone(),
         };
 
-        let _ = self.vhost.publish(MQTT_EXCHANGE, &amqp_routing_key, &msg);
+        if let Err(e) = self.vhost.publish(MQTT_EXCHANGE, &amqp_routing_key, &msg) {
+            warn!("MQTT publish to AMQP failed: {e}");
+        }
 
         // QoS acknowledgments
         match publish.qos {
@@ -234,21 +236,25 @@ impl MqttBroker {
                 client_id = session.client_id,
                 topic = topic
             );
-            let _ = self.vhost.declare_queue(QueueConfig {
+            if let Err(e) = self.vhost.declare_queue(QueueConfig {
                 name: queue_name.clone(),
                 durable: false,
                 exclusive: false,
                 auto_delete: true,
                 arguments: FieldTable::new(),
-            });
+            }) {
+                warn!("MQTT declare queue '{queue_name}' failed: {e}");
+            }
 
             // Bind queue to amq.topic with the routing key
-            let _ = self.vhost.bind_queue(
+            if let Err(e) = self.vhost.bind_queue(
                 &queue_name,
                 MQTT_EXCHANGE,
                 &amqp_routing_key,
                 &FieldTable::new(),
-            );
+            ) {
+                warn!("MQTT bind queue '{queue_name}' failed: {e}");
+            }
 
             session.subscribe(topic.clone(), *qos);
             return_codes.push(*qos as u8);
@@ -277,7 +283,9 @@ impl MqttBroker {
                     client_id = session.client_id,
                     topic = topic
                 );
-                let _ = self.vhost.delete_queue(&queue_name);
+                if let Err(e) = self.vhost.delete_queue(&queue_name) {
+                    warn!("MQTT delete queue '{queue_name}' on unsubscribe failed: {e}");
+                }
             }
         }
 
@@ -294,7 +302,9 @@ impl MqttBroker {
                 client_id = session.client_id,
                 topic = topic
             );
-            let _ = self.vhost.delete_queue(&queue_name);
+            if let Err(e) = self.vhost.delete_queue(&queue_name) {
+                warn!("MQTT cleanup delete queue '{queue_name}' failed: {e}");
+            }
         }
         self.sessions.lock().remove(&session.client_id);
     }
