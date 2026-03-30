@@ -142,6 +142,18 @@ impl UserStore {
         })
     }
 
+    /// Remove permissions for a user on a vhost.
+    pub fn remove_permissions(&self, username: &str, vhost: &str) -> Result<(), UserStoreError> {
+        let mut users = self.users.write();
+        let user = users
+            .get_mut(username)
+            .ok_or_else(|| UserStoreError::NotFound(username.to_string()))?;
+        user.remove_permissions(vhost);
+        drop(users);
+        self.save()?;
+        Ok(())
+    }
+
     /// Change a user's password.
     pub fn set_password(
         &self,
