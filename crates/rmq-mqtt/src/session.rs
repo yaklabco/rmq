@@ -2,8 +2,9 @@ use std::collections::HashMap;
 
 use bytes::Bytes;
 use parking_lot::RwLock;
+use tokio::task::JoinHandle;
 
-use crate::codec::QoS;
+use crate::codec::{QoS, WillMessage};
 
 /// MQTT session state for a client.
 pub struct Session {
@@ -15,6 +16,12 @@ pub struct Session {
     pub pending_acks: HashMap<u16, PendingMessage>,
     /// Next packet ID for server-originated messages.
     next_packet_id: u16,
+    /// Will message to publish on unexpected disconnect.
+    pub will: Option<WillMessage>,
+    /// Whether a clean DISCONNECT was received.
+    pub clean_disconnect: bool,
+    /// Delivery task handles per subscription topic.
+    pub delivery_tasks: HashMap<String, JoinHandle<()>>,
 }
 
 pub struct PendingMessage {
@@ -31,6 +38,9 @@ impl Session {
             subscriptions: HashMap::new(),
             pending_acks: HashMap::new(),
             next_packet_id: 1,
+            will: None,
+            clean_disconnect: false,
+            delivery_tasks: HashMap::new(),
         }
     }
 
@@ -49,6 +59,22 @@ impl Session {
 
     pub fn unsubscribe(&mut self, topic: &str) {
         self.subscriptions.remove(topic);
+        if let Some(handle) = self.delivery_tasks.remove(topic) {
+            handle.abort();
+        }
+    }
+
+    /// Cancel all delivery tasks.
+    pub fn cancel_all_delivery_tasks(&mut self) {
+        for (_, handle) in self.delivery_tasks.drain() {
+            handle.abort();
+        }
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.cancel_all_delivery_tasks();
     }
 }
 
@@ -108,7 +134,7 @@ impl Default for RetainStore {
 }
 
 /// Check if an MQTT topic matches a subscription filter.
-fn topic_matches_filter(topic: &str, filter: &str) -> bool {
+pub fn topic_matches_filter(topic: &str, filter: &str) -> bool {
     let topic_parts: Vec<&str> = topic.split('/').collect();
     let filter_parts: Vec<&str> = filter.split('/').collect();
     match_parts(&topic_parts, &filter_parts)
