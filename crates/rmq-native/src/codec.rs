@@ -1,3 +1,5 @@
+use std::io;
+
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 /// Protocol magic: "RMQ\x01"
@@ -115,15 +117,16 @@ impl NativeFrame {
         }
     }
 
-    /// Decode a frame from the buffer. Returns None if incomplete.
-    pub fn decode(buf: &mut BytesMut) -> Option<Self> {
+    /// Decode a frame from the buffer. Returns `Ok(None)` if incomplete,
+    /// or `Err` if the payload is malformed (insufficient bytes within a frame).
+    pub fn decode(buf: &mut BytesMut) -> Result<Option<Self>, io::Error> {
         if buf.len() < 5 {
-            return None; // need type + length
+            return Ok(None); // need type + length
         }
         let frame_type = buf[0];
         let length = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
         if buf.len() < 5 + length {
-            return None; // incomplete payload
+            return Ok(None); // incomplete payload
         }
 
         buf.advance(5); // consume type + length
@@ -131,51 +134,74 @@ impl NativeFrame {
 
         match frame_type {
             FRAME_AUTH => {
-                let username = get_str(&mut payload)?;
-                let password = get_str(&mut payload)?;
-                Some(Self::Auth { username, password })
+                let username =
+                    get_str(&mut payload).ok_or_else(|| eof("Auth: missing username"))?;
+                let password =
+                    get_str(&mut payload).ok_or_else(|| eof("Auth: missing password"))?;
+                Ok(Some(Self::Auth { username, password }))
             }
-            FRAME_AUTH_OK => Some(Self::AuthOk),
+            FRAME_AUTH_OK => Ok(Some(Self::AuthOk)),
             FRAME_PUBLISH => {
-                let queue = get_str(&mut payload)?;
+                let queue =
+                    get_str(&mut payload).ok_or_else(|| eof("Publish: missing queue name"))?;
+                check_remaining(&payload, 4, "Publish: missing message count")?;
                 let count = payload.get_u32() as usize;
                 let mut messages = Vec::with_capacity(count);
-                for _ in 0..count {
+                for i in 0..count {
+                    check_remaining(
+                        &payload,
+                        4,
+                        &format!("Publish: missing length for message {i}"),
+                    )?;
                     let len = payload.get_u32() as usize;
+                    check_remaining(&payload, len, &format!("Publish: truncated message {i}"))?;
                     messages.push(payload.split_to(len).freeze());
                 }
-                Some(Self::Publish { queue, messages })
+                Ok(Some(Self::Publish { queue, messages }))
             }
             FRAME_PUBLISH_OK => {
+                check_remaining(&payload, 4, "PublishOk: missing count")?;
                 let count = payload.get_u32();
-                Some(Self::PublishOk { count })
+                Ok(Some(Self::PublishOk { count }))
             }
             FRAME_CONSUME => {
-                let queue = get_str(&mut payload)?;
+                let queue =
+                    get_str(&mut payload).ok_or_else(|| eof("Consume: missing queue name"))?;
+                check_remaining(&payload, 4, "Consume: missing batch_size")?;
                 let batch_size = payload.get_u32();
+                check_remaining(&payload, 4, "Consume: missing prefetch")?;
                 let prefetch = payload.get_u32();
-                Some(Self::Consume {
+                Ok(Some(Self::Consume {
                     queue,
                     batch_size,
                     prefetch,
-                })
+                }))
             }
             FRAME_DELIVER => {
+                check_remaining(&payload, 8, "Deliver: missing batch_id")?;
                 let batch_id = payload.get_u64();
+                check_remaining(&payload, 4, "Deliver: missing message count")?;
                 let count = payload.get_u32() as usize;
                 let mut messages = Vec::with_capacity(count);
-                for _ in 0..count {
+                for i in 0..count {
+                    check_remaining(
+                        &payload,
+                        4,
+                        &format!("Deliver: missing length for message {i}"),
+                    )?;
                     let len = payload.get_u32() as usize;
+                    check_remaining(&payload, len, &format!("Deliver: truncated message {i}"))?;
                     messages.push(payload.split_to(len).freeze());
                 }
-                Some(Self::Deliver { batch_id, messages })
+                Ok(Some(Self::Deliver { batch_id, messages }))
             }
             FRAME_ACK => {
+                check_remaining(&payload, 8, "Ack: missing batch_id")?;
                 let batch_id = payload.get_u64();
-                Some(Self::Ack { batch_id })
+                Ok(Some(Self::Ack { batch_id }))
             }
-            FRAME_DISCONNECT => Some(Self::Disconnect),
-            _ => None,
+            FRAME_DISCONNECT => Ok(Some(Self::Disconnect)),
+            _ => Ok(None),
         }
     }
 }
@@ -183,6 +209,21 @@ impl NativeFrame {
 fn put_str(buf: &mut BytesMut, s: &str) {
     buf.put_u16(s.len() as u16);
     buf.put_slice(s.as_bytes());
+}
+
+fn eof(detail: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::UnexpectedEof,
+        format!("malformed frame: {detail}"),
+    )
+}
+
+fn check_remaining(buf: &BytesMut, needed: usize, detail: &str) -> Result<(), io::Error> {
+    if buf.remaining() < needed {
+        Err(eof(detail))
+    } else {
+        Ok(())
+    }
 }
 
 fn get_str(buf: &mut BytesMut) -> Option<String> {
@@ -204,7 +245,7 @@ mod tests {
     fn round_trip(frame: &NativeFrame) -> NativeFrame {
         let mut buf = BytesMut::new();
         frame.encode(&mut buf);
-        NativeFrame::decode(&mut buf).unwrap()
+        NativeFrame::decode(&mut buf).unwrap().unwrap()
     }
 
     #[test]
@@ -270,6 +311,64 @@ mod tests {
     #[test]
     fn test_incomplete_frame() {
         let mut buf = BytesMut::from(&[FRAME_AUTH, 0, 0, 0][..]);
-        assert!(NativeFrame::decode(&mut buf).is_none());
+        assert!(NativeFrame::decode(&mut buf).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_malformed_publish_missing_count() {
+        // FRAME_PUBLISH with a payload that has a queue name but no message count
+        let mut buf = BytesMut::new();
+        buf.put_u8(FRAME_PUBLISH);
+        // payload: just a short queue name "q" (2-byte len + 1 byte)
+        buf.put_u32(3); // payload length
+        buf.put_u16(1); // string length
+        buf.put_u8(b'q');
+        let err = NativeFrame::decode(&mut buf).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn test_malformed_ack_missing_batch_id() {
+        let mut buf = BytesMut::new();
+        buf.put_u8(FRAME_ACK);
+        buf.put_u32(4); // payload too short for u64
+        buf.put_u32(0);
+        let err = NativeFrame::decode(&mut buf).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn test_malformed_deliver_truncated_message() {
+        let mut buf = BytesMut::new();
+        buf.put_u8(FRAME_DELIVER);
+        // payload: batch_id(8) + count(4) + msg_len(4) = 16, but msg body missing
+        buf.put_u32(16);
+        buf.put_u64(1); // batch_id
+        buf.put_u32(1); // 1 message
+        buf.put_u32(100); // claims 100 bytes but there are none
+        let err = NativeFrame::decode(&mut buf).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn test_malformed_consume_missing_prefetch() {
+        let mut buf = BytesMut::new();
+        buf.put_u8(FRAME_CONSUME);
+        // payload: queue "q" (3 bytes) + batch_size (4) = 7, missing prefetch
+        buf.put_u32(7);
+        buf.put_u16(1);
+        buf.put_u8(b'q');
+        buf.put_u32(10);
+        let err = NativeFrame::decode(&mut buf).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn test_malformed_publish_ok_empty_payload() {
+        let mut buf = BytesMut::new();
+        buf.put_u8(FRAME_PUBLISH_OK);
+        buf.put_u32(0); // empty payload, needs 4 bytes
+        let err = NativeFrame::decode(&mut buf).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
     }
 }

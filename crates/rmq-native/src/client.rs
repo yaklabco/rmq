@@ -114,9 +114,10 @@ impl NativeClient {
             Ok(Ok(n)) => {
                 self.read_buf.extend_from_slice(&tmp[..n]);
                 match NativeFrame::decode(&mut self.read_buf) {
-                    Some(NativeFrame::Deliver { batch_id, messages }) => {
+                    Ok(Some(NativeFrame::Deliver { batch_id, messages })) => {
                         Ok(Some((batch_id, messages)))
                     }
+                    Err(e) => Err(e.into()),
                     _ => Ok(None),
                 }
             }
@@ -147,8 +148,10 @@ impl NativeClient {
         &mut self,
     ) -> Result<NativeFrame, Box<dyn std::error::Error + Send + Sync>> {
         loop {
-            if let Some(frame) = NativeFrame::decode(&mut self.read_buf) {
-                return Ok(frame);
+            match NativeFrame::decode(&mut self.read_buf) {
+                Ok(Some(frame)) => return Ok(frame),
+                Err(e) => return Err(e.into()),
+                Ok(None) => {}
             }
             let mut tmp = [0u8; 65536];
             let n = self.reader.read(&mut tmp).await?;

@@ -1,7 +1,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use lz4_flex::compress_prepend_size;
 use lz4_flex::decompress_size_prepended;
 use tracing::{debug, info};
@@ -9,11 +9,40 @@ use tracing::{debug, info};
 use crate::actions::ReplicationAction;
 use crate::file_index::FileIndex;
 
+/// Verify that the resolved path stays within `data_dir`.
+fn validate_path(data_dir: &Path, path: &Path) -> io::Result<std::path::PathBuf> {
+    let full_path = data_dir.join(path);
+    // Create parent dirs so canonicalize can resolve
+    if let Some(parent) = full_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let canonical = full_path.canonicalize().unwrap_or_else(|_| {
+        // For new files, canonicalize the parent and append the file name
+        if let (Some(parent), Some(file_name)) = (full_path.parent(), full_path.file_name()) {
+            if let Ok(canonical_parent) = parent.canonicalize() {
+                return canonical_parent.join(file_name);
+            }
+        }
+        full_path.clone()
+    });
+    let canonical_data_dir = data_dir.canonicalize()?;
+    if !canonical.starts_with(&canonical_data_dir) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "path traversal detected: '{}' escapes data directory",
+                path.display()
+            ),
+        ));
+    }
+    Ok(canonical)
+}
+
 /// Apply a replication action to a data directory.
 pub fn apply_action(data_dir: &Path, action: &ReplicationAction) -> io::Result<()> {
     match action {
         ReplicationAction::Replace { path, data } => {
-            let full_path = data_dir.join(path);
+            let full_path = validate_path(data_dir, path)?;
             if let Some(parent) = full_path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
@@ -21,7 +50,7 @@ pub fn apply_action(data_dir: &Path, action: &ReplicationAction) -> io::Result<(
             debug!("replicated: replace {}", path.display());
         }
         ReplicationAction::Append { path, data } => {
-            let full_path = data_dir.join(path);
+            let full_path = validate_path(data_dir, path)?;
             use std::io::Write;
             let mut file = std::fs::OpenOptions::new()
                 .create(true)
@@ -35,7 +64,7 @@ pub fn apply_action(data_dir: &Path, action: &ReplicationAction) -> io::Result<(
             );
         }
         ReplicationAction::Delete { path } => {
-            let full_path = data_dir.join(path);
+            let full_path = validate_path(data_dir, path)?;
             if full_path.exists() {
                 std::fs::remove_file(&full_path)?;
                 debug!("replicated: delete {}", path.display());
@@ -46,8 +75,10 @@ pub fn apply_action(data_dir: &Path, action: &ReplicationAction) -> io::Result<(
 }
 
 /// Compress a batch of replication actions using LZ4.
+/// Prepends a u32 action count header before the action data.
 pub fn compress_actions(actions: &[ReplicationAction]) -> Bytes {
     let mut buf = BytesMut::new();
+    buf.put_u32(actions.len() as u32); // action count header
     for action in actions {
         action.encode(&mut buf);
     }
@@ -56,19 +87,48 @@ pub fn compress_actions(actions: &[ReplicationAction]) -> Bytes {
 }
 
 /// Decompress and decode a batch of replication actions.
+/// Validates the action count header matches the number of decoded actions.
 pub fn decompress_actions(data: &[u8]) -> io::Result<Vec<ReplicationAction>> {
     let decompressed = decompress_size_prepended(data)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
     let mut buf = Bytes::from(decompressed);
-    let mut actions = Vec::new();
+    if buf.remaining() < 4 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "missing action count header",
+        ));
+    }
+    let expected_count = buf.get_u32() as usize;
+
+    let mut actions = Vec::with_capacity(expected_count);
     while buf.has_remaining() {
-        if let Some(action) = ReplicationAction::decode(&mut buf) {
-            actions.push(action);
-        } else {
-            break;
+        match ReplicationAction::decode(&mut buf) {
+            Ok(Some(action)) => actions.push(action),
+            Ok(None) => break,
+            Err(e) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "partial decode: decoded {} of {} expected actions: {e}",
+                        actions.len(),
+                        expected_count
+                    ),
+                ));
+            }
         }
     }
+
+    if actions.len() != expected_count {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "action count mismatch: expected {expected_count}, decoded {}",
+                actions.len()
+            ),
+        ));
+    }
+
     Ok(actions)
 }
 
@@ -184,6 +244,58 @@ mod tests {
         let compressed = compress_actions(&actions);
         let decompressed = decompress_actions(&compressed).unwrap();
         assert_eq!(decompressed, actions);
+    }
+
+    #[test]
+    fn test_path_traversal_blocked() {
+        let dir = TempDir::new().unwrap();
+        let action = ReplicationAction::Replace {
+            path: PathBuf::from("../../etc/passwd"),
+            data: Bytes::from_static(b"pwned"),
+        };
+        let err = apply_action(dir.path(), &action).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert!(err.to_string().contains("path traversal"));
+    }
+
+    #[test]
+    fn test_path_traversal_absolute_path() {
+        let dir = TempDir::new().unwrap();
+        let action = ReplicationAction::Delete {
+            path: PathBuf::from("/tmp/should_not_delete"),
+        };
+        let err = apply_action(dir.path(), &action).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn test_decompress_actions_count_mismatch() {
+        // Manually create compressed data with wrong count header
+        let mut buf = BytesMut::new();
+        buf.put_u32(5); // claim 5 actions
+        // but encode only 1
+        let action = ReplicationAction::Delete {
+            path: PathBuf::from("a.txt"),
+        };
+        action.encode(&mut buf);
+        let compressed = compress_prepend_size(&buf);
+        let err = decompress_actions(&compressed).unwrap_err();
+        assert!(err.to_string().contains("count mismatch"));
+    }
+
+    #[test]
+    fn test_decompress_actions_partial_decode() {
+        // Create compressed data with correct count but truncated action data
+        let mut buf = BytesMut::new();
+        buf.put_u32(1); // 1 action expected
+        buf.put_u8(1); // TAG_REPLACE
+        // path but no data length/data - truncated
+        buf.put_u16(4);
+        buf.put_slice(b"test");
+        // missing data length
+        let compressed = compress_prepend_size(&buf);
+        let err = decompress_actions(&compressed).unwrap_err();
+        assert!(err.to_string().contains("partial decode"));
     }
 
     #[test]

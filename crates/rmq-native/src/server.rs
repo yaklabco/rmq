@@ -6,8 +6,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::TcpListener;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
+use rmq_auth::user::User;
 use rmq_auth::user_store::UserStore;
 use rmq_broker::queue::QueueConfig;
 use rmq_broker::vhost::VHost;
@@ -62,7 +63,7 @@ async fn handle_client(
 
     let mut read_buf = BytesMut::with_capacity(256 * 1024);
     let mut write_buf = BytesMut::with_capacity(256 * 1024);
-    let mut authenticated = false;
+    let mut auth_user: Option<User> = None;
     let batch_counter = AtomicU64::new(0);
 
     // Per-consumer state
@@ -79,104 +80,108 @@ async fn handle_client(
         read_buf.extend_from_slice(&tmp[..n]);
 
         // Process all complete frames
-        while let Some(frame) = NativeFrame::decode(&mut read_buf) {
-            match frame {
-                NativeFrame::Auth { username, password } => {
-                    if user_store.authenticate(&username, &password).is_ok() {
-                        authenticated = true;
-                        write_buf.clear();
-                        NativeFrame::AuthOk.encode(&mut write_buf);
-                        writer.write_all(&write_buf).await?;
-                        writer.flush().await?;
-                    } else {
-                        return Err("auth failed".into());
-                    }
+        loop {
+            match NativeFrame::decode(&mut read_buf) {
+                Err(e) => {
+                    warn!("malformed frame from client: {e}");
+                    requeue_unacked(&vhost, &consuming);
+                    return Err(e.into());
                 }
-
-                NativeFrame::Publish { queue, messages } if authenticated => {
-                    // Ensure queue exists (auto-declare)
-                    let _ = vhost.declare_queue(QueueConfig {
-                        name: queue.clone(),
-                        durable: false,
-                        exclusive: false,
-                        auto_delete: false,
-                        arguments: FieldTable::new(),
-                    });
-
-                    let q = vhost.get_queue(&queue).ok_or("queue not found")?;
-                    let timestamp = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs() as i64;
-
-                    let count = messages.len() as u32;
-                    for body in messages {
-                        let msg = StoredMessage {
-                            timestamp,
-                            exchange: String::new(),
-                            routing_key: queue.clone(),
-                            properties: BasicProperties::default(),
-                            body,
-                        };
-                        let _ = q.publish(&msg);
-                    }
-
-                    // Single ack for the entire batch
-                    write_buf.clear();
-                    NativeFrame::PublishOk { count }.encode(&mut write_buf);
-                    writer.write_all(&write_buf).await?;
-                    writer.flush().await?;
-                }
-
-                NativeFrame::Consume {
-                    queue,
-                    batch_size,
-                    prefetch,
-                } if authenticated => {
-                    // Ensure queue exists
-                    let _ = vhost.declare_queue(QueueConfig {
-                        name: queue.clone(),
-                        durable: false,
-                        exclusive: false,
-                        auto_delete: false,
-                        arguments: FieldTable::new(),
-                    });
-
-                    consuming = Some(ConsumerState {
-                        queue_name: queue,
-                        batch_size,
-                        prefetch,
-                        unacked_batches: Vec::new(),
-                    });
-
-                    // Start delivering immediately
-                    if let Some(ref mut state) = consuming {
-                        deliver_batch(&vhost, state, &batch_counter, &mut write_buf, &mut writer)
-                            .await?;
-                    }
-                }
-
-                NativeFrame::Ack { batch_id } if authenticated => {
-                    if let Some(ref mut state) = consuming {
-                        // Ack the batch — remove from unacked and ack in store
-                        if let Some(pos) = state
-                            .unacked_batches
-                            .iter()
-                            .position(|b| b.batch_id == batch_id)
-                        {
-                            let batch = state.unacked_batches.remove(pos);
-                            if let Some(q) = vhost.get_queue(&state.queue_name) {
-                                let _ = q.ack_batch(&batch.positions);
+                Ok(None) => break, // incomplete, need more data
+                Ok(Some(frame)) => match frame {
+                    NativeFrame::Auth { username, password } => {
+                        match user_store.authenticate(&username, &password) {
+                            Ok(user) => {
+                                auth_user = Some(user);
+                                write_buf.clear();
+                                NativeFrame::AuthOk.encode(&mut write_buf);
+                                writer.write_all(&write_buf).await?;
+                                writer.flush().await?;
+                            }
+                            Err(_) => {
+                                return Err("auth failed".into());
                             }
                         }
+                    }
 
-                        // Deliver next batch if we have capacity
-                        let total_unacked: usize = state
-                            .unacked_batches
-                            .iter()
-                            .map(|b| b.positions.len())
-                            .sum();
-                        if total_unacked < state.prefetch as usize {
+                    NativeFrame::Publish { queue, messages } if auth_user.is_some() => {
+                        let user = auth_user.as_ref().unwrap();
+
+                        // Check write permission before auto-declaring
+                        if !user.can_write(vhost.name(), &queue) {
+                            return Err(format!(
+                                "user '{}' lacks write permission to queue '{}'",
+                                user.username, queue
+                            )
+                            .into());
+                        }
+
+                        // Ensure queue exists (auto-declare)
+                        let _ = vhost.declare_queue(QueueConfig {
+                            name: queue.clone(),
+                            durable: false,
+                            exclusive: false,
+                            auto_delete: false,
+                            arguments: FieldTable::new(),
+                        });
+
+                        let q = vhost.get_queue(&queue).ok_or("queue not found")?;
+                        let timestamp = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs() as i64;
+
+                        let count = messages.len() as u32;
+                        for body in messages {
+                            let msg = StoredMessage {
+                                timestamp,
+                                exchange: String::new(),
+                                routing_key: queue.clone(),
+                                properties: BasicProperties::default(),
+                                body,
+                            };
+                            let _ = q.publish(&msg);
+                        }
+
+                        // Single ack for the entire batch
+                        write_buf.clear();
+                        NativeFrame::PublishOk { count }.encode(&mut write_buf);
+                        writer.write_all(&write_buf).await?;
+                        writer.flush().await?;
+                    }
+
+                    NativeFrame::Consume {
+                        queue,
+                        batch_size,
+                        prefetch,
+                    } if auth_user.is_some() => {
+                        // Check read permission
+                        if let Some(ref user) = auth_user {
+                            if !user.can_read(vhost.name(), &queue) {
+                                tracing::warn!(
+                                    "consume denied: no read permission for queue {queue}"
+                                );
+                                break;
+                            }
+                        }
+                        // Ensure queue exists
+                        let _ = vhost.declare_queue(QueueConfig {
+                            name: queue.clone(),
+                            durable: false,
+                            exclusive: false,
+                            auto_delete: false,
+                            arguments: FieldTable::new(),
+                        });
+
+                        consuming = Some(ConsumerState {
+                            queue_name: queue,
+                            batch_size,
+                            prefetch,
+                            unacked_batches: Vec::new(),
+                        });
+
+                        // Start delivering immediately
+                        if let Some(ref mut state) = consuming {
                             deliver_batch(
                                 &vhost,
                                 state,
@@ -187,14 +192,52 @@ async fn handle_client(
                             .await?;
                         }
                     }
-                }
 
-                NativeFrame::Disconnect => break,
-                _ => {}
+                    NativeFrame::Ack { batch_id } if auth_user.is_some() => {
+                        if let Some(ref mut state) = consuming {
+                            // Ack the batch — remove from unacked and ack in store
+                            if let Some(pos) = state
+                                .unacked_batches
+                                .iter()
+                                .position(|b| b.batch_id == batch_id)
+                            {
+                                let batch = state.unacked_batches.remove(pos);
+                                if let Some(q) = vhost.get_queue(&state.queue_name) {
+                                    let _ = q.ack_batch(&batch.positions);
+                                }
+                            }
+
+                            // Deliver next batch if we have capacity
+                            let total_unacked: usize = state
+                                .unacked_batches
+                                .iter()
+                                .map(|b| b.positions.len())
+                                .sum();
+                            if total_unacked < state.prefetch as usize {
+                                deliver_batch(
+                                    &vhost,
+                                    state,
+                                    &batch_counter,
+                                    &mut write_buf,
+                                    &mut writer,
+                                )
+                                .await?;
+                            }
+                        }
+                    }
+
+                    NativeFrame::Disconnect => {
+                        requeue_unacked(&vhost, &consuming);
+                        return Ok(());
+                    }
+                    _ => {}
+                },
             }
         }
     }
 
+    // Connection closed (read returned 0 or error) — requeue unacked messages
+    requeue_unacked(&vhost, &consuming);
     Ok(())
 }
 
@@ -208,6 +251,27 @@ struct ConsumerState {
 struct UnackedBatch {
     batch_id: u64,
     positions: Vec<SegmentPosition>,
+}
+
+/// Requeue all unacked messages when a consumer disconnects.
+fn requeue_unacked(vhost: &Arc<VHost>, consuming: &Option<ConsumerState>) {
+    if let Some(state) = consuming {
+        let mut requeued = 0usize;
+        for batch in &state.unacked_batches {
+            if let Some(queue) = vhost.get_queue(&state.queue_name) {
+                for sp in &batch.positions {
+                    queue.requeue(*sp);
+                    requeued += 1;
+                }
+            }
+        }
+        if requeued > 0 {
+            info!(
+                "requeued {requeued} unacked messages on disconnect for queue '{}'",
+                state.queue_name
+            );
+        }
+    }
 }
 
 async fn deliver_batch(
@@ -354,7 +418,7 @@ mod tests {
         frame_buf.put_u8(header[0]);
         frame_buf.extend_from_slice(&header[1..]);
         frame_buf.extend_from_slice(&payload);
-        let frame = NativeFrame::decode(&mut frame_buf).unwrap();
+        let frame = NativeFrame::decode(&mut frame_buf).unwrap().unwrap();
         match frame {
             NativeFrame::Deliver { batch_id, messages } => {
                 assert_eq!(messages.len(), 50); // batch_size=50

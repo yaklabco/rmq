@@ -10,19 +10,9 @@ use rmq_broker::vhost::VHost;
 use crate::federation::{FederationUpstream, run_federation_link};
 use crate::shovel::{ShovelConfig, run_shovel};
 
-/// State of a running shovel or federation link.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum RunnerState {
-    Running,
-    Stopped,
-    Error,
-}
-
-#[allow(dead_code)]
 struct RunningTask {
     cancel_tx: watch::Sender<bool>,
     handle: tokio::task::JoinHandle<u64>,
-    state: RunnerState,
 }
 
 /// Manages multiple shovels and federation links.
@@ -47,14 +37,9 @@ impl ShovelRunner {
 
         let handle = tokio::spawn(async move { run_shovel(vhost, &config, cancel_rx).await });
 
-        self.shovels.lock().insert(
-            name,
-            RunningTask {
-                cancel_tx,
-                handle,
-                state: RunnerState::Running,
-            },
-        );
+        self.shovels
+            .lock()
+            .insert(name, RunningTask { cancel_tx, handle });
     }
 
     /// Start a federation link.
@@ -67,14 +52,9 @@ impl ShovelRunner {
             run_federation_link(vhost, &upstream, &src_queue, cancel_rx).await
         });
 
-        self.shovels.lock().insert(
-            name,
-            RunningTask {
-                cancel_tx,
-                handle,
-                state: RunnerState::Running,
-            },
-        );
+        self.shovels
+            .lock()
+            .insert(name, RunningTask { cancel_tx, handle });
     }
 
     /// Stop a shovel or federation link by name.

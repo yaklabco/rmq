@@ -1,3 +1,4 @@
+use std::io;
 use std::path::PathBuf;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -41,30 +42,38 @@ impl ReplicationAction {
         }
     }
 
-    /// Decode an action from bytes.
-    pub fn decode(buf: &mut Bytes) -> Option<Self> {
+    /// Decode an action from bytes. Returns `Ok(None)` when the buffer is empty,
+    /// or `Err` if insufficient data remains for a complete action.
+    pub fn decode(buf: &mut Bytes) -> Result<Option<Self>, io::Error> {
         if !buf.has_remaining() {
-            return None;
+            return Ok(None);
         }
         let tag = buf.get_u8();
         match tag {
             TAG_REPLACE => {
-                let path = decode_path(buf)?;
+                let path = decode_path(buf).ok_or_else(|| eof("Replace: missing path"))?;
+                check_remaining(buf, 4, "Replace: missing data length")?;
                 let len = buf.get_u32() as usize;
+                check_remaining(buf, len, "Replace: truncated data")?;
                 let data = buf.split_to(len);
-                Some(Self::Replace { path, data })
+                Ok(Some(Self::Replace { path, data }))
             }
             TAG_APPEND => {
-                let path = decode_path(buf)?;
+                let path = decode_path(buf).ok_or_else(|| eof("Append: missing path"))?;
+                check_remaining(buf, 4, "Append: missing data length")?;
                 let len = buf.get_u32() as usize;
+                check_remaining(buf, len, "Append: truncated data")?;
                 let data = buf.split_to(len);
-                Some(Self::Append { path, data })
+                Ok(Some(Self::Append { path, data }))
             }
             TAG_DELETE => {
-                let path = decode_path(buf)?;
-                Some(Self::Delete { path })
+                let path = decode_path(buf).ok_or_else(|| eof("Delete: missing path"))?;
+                Ok(Some(Self::Delete { path }))
             }
-            _ => None,
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unknown action tag: {tag}"),
+            )),
         }
     }
 
@@ -75,6 +84,21 @@ impl ReplicationAction {
             Self::Append { path, data } => 1 + 2 + path_len(path) + 4 + data.len(),
             Self::Delete { path } => 1 + 2 + path_len(path),
         }
+    }
+}
+
+fn eof(detail: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::UnexpectedEof,
+        format!("malformed action: {detail}"),
+    )
+}
+
+fn check_remaining(buf: &Bytes, needed: usize, detail: &str) -> Result<(), io::Error> {
+    if buf.remaining() < needed {
+        Err(eof(detail))
+    } else {
+        Ok(())
     }
 }
 
@@ -109,7 +133,7 @@ mod tests {
         let mut buf = BytesMut::new();
         action.encode(&mut buf);
         let mut bytes = buf.freeze();
-        ReplicationAction::decode(&mut bytes).unwrap()
+        ReplicationAction::decode(&mut bytes).unwrap().unwrap()
     }
 
     #[test]
@@ -147,5 +171,55 @@ mod tests {
         let mut buf = BytesMut::new();
         action.encode(&mut buf);
         assert_eq!(buf.len(), action.encoded_size());
+    }
+
+    #[test]
+    fn test_decode_empty_buffer() {
+        let mut buf = Bytes::new();
+        assert!(ReplicationAction::decode(&mut buf).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_decode_replace_truncated_data() {
+        let mut buf = BytesMut::new();
+        buf.put_u8(TAG_REPLACE);
+        buf.put_u16(4); // path length
+        buf.put_slice(b"test");
+        buf.put_u32(100); // claims 100 bytes of data
+        // but only 0 bytes follow
+        let mut bytes = buf.freeze();
+        let err = ReplicationAction::decode(&mut bytes).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn test_decode_append_missing_data_length() {
+        let mut buf = BytesMut::new();
+        buf.put_u8(TAG_APPEND);
+        buf.put_u16(4); // path length
+        buf.put_slice(b"test");
+        // missing data length field
+        let mut bytes = buf.freeze();
+        let err = ReplicationAction::decode(&mut bytes).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn test_decode_delete_missing_path() {
+        let mut buf = BytesMut::new();
+        buf.put_u8(TAG_DELETE);
+        // missing path entirely
+        let mut bytes = buf.freeze();
+        let err = ReplicationAction::decode(&mut bytes).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn test_decode_unknown_tag() {
+        let mut buf = BytesMut::new();
+        buf.put_u8(255); // unknown tag
+        let mut bytes = buf.freeze();
+        let err = ReplicationAction::decode(&mut bytes).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 }
