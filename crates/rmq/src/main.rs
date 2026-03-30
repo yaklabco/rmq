@@ -48,8 +48,8 @@ struct Cli {
     #[arg(long, default_value = "0.0.0.0:15672")]
     mgmt_bind: SocketAddr,
 
-    /// Flush coordinator interval in milliseconds.
-    #[arg(long, default_value = "2")]
+    /// Flush coordinator interval in milliseconds (must be >= 1).
+    #[arg(long, default_value = "2", value_parser = clap::value_parser!(u64).range(1..))]
     flush_interval_ms: u64,
 }
 
