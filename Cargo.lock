@@ -2206,6 +2206,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "base64",
+ "http-body-util",
  "reqwest",
  "rmq-auth",
  "rmq-broker",
@@ -2215,6 +2216,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tower",
  "tower-http",
  "tracing",
 ]
