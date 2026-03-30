@@ -108,7 +108,7 @@ impl FieldValue {
             FieldValue::Bool(_) => b't',
             FieldValue::I8(_) => b'b',
             FieldValue::U8(_) => b'B',
-            FieldValue::I16(_) => b's',
+            FieldValue::I16(_) => b'O', // 'O' for "ordinal short" — avoids collision with ShortString 's'
             FieldValue::U16(_) => b'u',
             FieldValue::I32(_) => b'I',
             FieldValue::U32(_) => b'i',
@@ -116,7 +116,7 @@ impl FieldValue {
             FieldValue::U64(_) => b'L', // non-standard but used by RabbitMQ
             FieldValue::F32(_) => b'f',
             FieldValue::F64(_) => b'd',
-            FieldValue::ShortString(_) => b'S', // using long string encoding for compatibility
+            FieldValue::ShortString(_) => b's', // AMQP extension: short string (1-byte length prefix)
             FieldValue::LongString(_) => b'S',
             FieldValue::Timestamp(_) => b'T',
             FieldValue::FieldTable(_) => b'F',
@@ -135,7 +135,7 @@ impl FieldValue {
             FieldValue::I64(_) | FieldValue::U64(_) => 8,
             FieldValue::F32(_) => 4,
             FieldValue::F64(_) => 8,
-            FieldValue::ShortString(s) => 4 + s.len() as u32,
+            FieldValue::ShortString(s) => 1 + s.len() as u32, // 1-byte length prefix
             FieldValue::LongString(b) => 4 + b.len() as u32,
             FieldValue::Timestamp(_) => 8,
             FieldValue::FieldTable(t) => 4 + t.encoded_size(),
@@ -159,7 +159,7 @@ impl FieldValue {
             FieldValue::F32(v) => buf.put_f32(*v),
             FieldValue::F64(v) => buf.put_f64(*v),
             FieldValue::ShortString(s) => {
-                buf.put_u32(s.len() as u32);
+                buf.put_u8(s.len() as u8); // 1-byte length prefix for short strings
                 buf.put_slice(s.as_bytes());
             }
             FieldValue::LongString(b) => {
@@ -205,6 +205,18 @@ impl FieldValue {
                 Ok(FieldValue::U8(buf.get_u8()))
             }
             b's' => {
+                // AMQP extension: short string with 1-byte length prefix
+                ensure_remaining(buf, 1)?;
+                let len = buf.get_u8() as usize;
+                ensure_remaining(buf, len)?;
+                let data = buf.split_to(len);
+                let s = std::str::from_utf8(&data).map_err(|e| {
+                    ProtocolError::InvalidFieldTable(format!("invalid UTF-8 in short string: {e}"))
+                })?;
+                Ok(FieldValue::ShortString(s.to_string()))
+            }
+            b'O' => {
+                // I16 (moved from 's' to avoid collision with ShortString)
                 ensure_remaining(buf, 2)?;
                 Ok(FieldValue::I16(buf.get_i16()))
             }
@@ -241,10 +253,7 @@ impl FieldValue {
                 let len = buf.get_u32() as usize;
                 ensure_remaining(buf, len)?;
                 let data = buf.split_to(len);
-                match std::str::from_utf8(&data) {
-                    Ok(s) => Ok(FieldValue::ShortString(s.to_string())),
-                    Err(_) => Ok(FieldValue::LongString(data)),
-                }
+                Ok(FieldValue::LongString(data))
             }
             b'T' => {
                 ensure_remaining(buf, 8)?;
@@ -399,6 +408,66 @@ mod tests {
         let mut bytes = buf.freeze();
         let decoded = decode_short_string(&mut bytes).unwrap();
         assert_eq!(decoded, max_str);
+    }
+
+    #[test]
+    fn test_short_string_and_long_string_distinct_tags() {
+        let short = FieldValue::ShortString("hello".into());
+        let long = FieldValue::LongString(Bytes::from_static(b"world"));
+
+        // Verify they use different type tags
+        assert_eq!(short.type_tag(), b's');
+        assert_eq!(long.type_tag(), b'S');
+        assert_ne!(short.type_tag(), long.type_tag());
+    }
+
+    #[test]
+    fn test_short_string_field_value_round_trip() {
+        let value = FieldValue::ShortString("test-string".into());
+        let mut buf = BytesMut::new();
+        value.encode(&mut buf).unwrap();
+        let mut bytes = buf.freeze();
+        let decoded = FieldValue::decode(&mut bytes).unwrap();
+        assert_eq!(decoded, value);
+    }
+
+    #[test]
+    fn test_long_string_field_value_round_trip() {
+        let value = FieldValue::LongString(Bytes::from_static(b"binary\x00data"));
+        let mut buf = BytesMut::new();
+        value.encode(&mut buf).unwrap();
+        let mut bytes = buf.freeze();
+        let decoded = FieldValue::decode(&mut bytes).unwrap();
+        assert_eq!(decoded, value);
+    }
+
+    #[test]
+    fn test_i16_field_value_round_trip_new_tag() {
+        // I16 was moved from 's' to 'O' to avoid collision with ShortString
+        let value = FieldValue::I16(-1000);
+        let mut buf = BytesMut::new();
+        value.encode(&mut buf).unwrap();
+        // Verify it uses 'O' tag
+        assert_eq!(buf[0], b'O');
+        let mut bytes = buf.freeze();
+        let decoded = FieldValue::decode(&mut bytes).unwrap();
+        assert_eq!(decoded, value);
+    }
+
+    #[test]
+    fn test_mixed_short_long_string_table() {
+        let mut table = FieldTable::new();
+        table.insert("short", FieldValue::ShortString("compact".into()));
+        table.insert(
+            "long",
+            FieldValue::LongString(Bytes::from_static(b"verbose data here")),
+        );
+
+        let mut buf = BytesMut::new();
+        table.encode(&mut buf).unwrap();
+        let mut bytes = buf.freeze();
+        let decoded = FieldTable::decode(&mut bytes).unwrap();
+        assert_eq!(table, decoded);
     }
 
     #[test]
