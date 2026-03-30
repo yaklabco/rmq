@@ -35,6 +35,12 @@ pub trait Exchange: Send + Sync {
 
     /// Number of bindings.
     fn binding_count(&self) -> usize;
+
+    /// Return all bindings as (destination, routing_key, arguments) tuples.
+    fn bindings(&self) -> Vec<(Destination, String, FieldTable)>;
+
+    /// Remove ALL bindings for a given destination, regardless of routing key.
+    fn unbind_destination(&mut self, dest: &Destination);
 }
 
 /// Common exchange state.
@@ -109,6 +115,23 @@ impl Exchange for DirectExchange {
     fn binding_count(&self) -> usize {
         self.bindings.values().map(|s| s.len()).sum()
     }
+
+    fn bindings(&self) -> Vec<(Destination, String, FieldTable)> {
+        let mut result = Vec::new();
+        for (key, dests) in &self.bindings {
+            for dest in dests {
+                result.push((dest.clone(), key.clone(), FieldTable::new()));
+            }
+        }
+        result
+    }
+
+    fn unbind_destination(&mut self, dest: &Destination) {
+        self.bindings.retain(|_, dests| {
+            dests.remove(dest);
+            !dests.is_empty()
+        });
+    }
 }
 
 /// Fanout exchange: routes to all bound destinations regardless of routing key.
@@ -160,6 +183,17 @@ impl Exchange for FanoutExchange {
 
     fn binding_count(&self) -> usize {
         self.bindings.len()
+    }
+
+    fn bindings(&self) -> Vec<(Destination, String, FieldTable)> {
+        self.bindings
+            .iter()
+            .map(|dest| (dest.clone(), String::new(), FieldTable::new()))
+            .collect()
+    }
+
+    fn unbind_destination(&mut self, dest: &Destination) {
+        self.bindings.remove(dest);
     }
 }
 
@@ -218,6 +252,14 @@ impl Exchange for DefaultExchange {
 
     fn binding_count(&self) -> usize {
         0
+    }
+
+    fn bindings(&self) -> Vec<(Destination, String, FieldTable)> {
+        Vec::new()
+    }
+
+    fn unbind_destination(&mut self, _dest: &Destination) {
+        // Default exchange doesn't accept explicit bindings
     }
 }
 
@@ -359,6 +401,17 @@ impl Exchange for TopicExchange {
     fn binding_count(&self) -> usize {
         self.bindings.len()
     }
+
+    fn bindings(&self) -> Vec<(Destination, String, FieldTable)> {
+        self.bindings
+            .iter()
+            .map(|(pattern, dest)| (dest.clone(), pattern.original.clone(), FieldTable::new()))
+            .collect()
+    }
+
+    fn unbind_destination(&mut self, dest: &Destination) {
+        self.bindings.retain(|(_, d)| d != dest);
+    }
 }
 
 /// Headers exchange: routes based on message header matching.
@@ -460,16 +513,45 @@ impl Exchange for HeadersExchange {
     fn binding_count(&self) -> usize {
         self.bindings.len()
     }
+
+    fn bindings(&self) -> Vec<(Destination, String, FieldTable)> {
+        self.bindings
+            .iter()
+            .map(|(args, dest, mode)| {
+                let mut arguments = args.clone();
+                let mode_str = match mode {
+                    HeadersMatchMode::All => "all",
+                    HeadersMatchMode::Any => "any",
+                };
+                arguments.insert(
+                    "x-match",
+                    rmq_protocol::field_table::FieldValue::ShortString(mode_str.to_string()),
+                );
+                (dest.clone(), String::new(), arguments)
+            })
+            .collect()
+    }
+
+    fn unbind_destination(&mut self, dest: &Destination) {
+        self.bindings.retain(|(_, d, _)| d != dest);
+    }
+}
+
+/// Error type for exchange creation.
+#[derive(Debug, thiserror::Error)]
+pub enum ExchangeError {
+    #[error("unknown exchange type: '{0}'")]
+    UnknownType(String),
 }
 
 /// Create an exchange from its type string.
-pub fn create_exchange(config: ExchangeConfig) -> Box<dyn Exchange> {
+pub fn create_exchange(config: ExchangeConfig) -> Result<Box<dyn Exchange>, ExchangeError> {
     match config.exchange_type.as_str() {
-        "direct" => Box::new(DirectExchange::new(config)),
-        "fanout" => Box::new(FanoutExchange::new(config)),
-        "topic" => Box::new(TopicExchange::new(config)),
-        "headers" => Box::new(HeadersExchange::new(config)),
-        _ => Box::new(DirectExchange::new(config)),
+        "direct" => Ok(Box::new(DirectExchange::new(config))),
+        "fanout" => Ok(Box::new(FanoutExchange::new(config))),
+        "topic" => Ok(Box::new(TopicExchange::new(config))),
+        "headers" => Ok(Box::new(HeadersExchange::new(config))),
+        _ => Err(ExchangeError::UnknownType(config.exchange_type)),
     }
 }
 
@@ -811,5 +893,112 @@ mod tests {
         headers.insert("format", FieldValue::ShortString("pdf".into()));
         headers.insert("extra", FieldValue::ShortString("ignored".into()));
         assert_eq!(ex.route("", Some(&headers)).len(), 1);
+    }
+
+    // --- bindings() and unbind_destination() tests ---
+
+    #[test]
+    fn test_direct_bindings_method() {
+        let config = ExchangeConfig {
+            name: "test".into(),
+            exchange_type: "direct".into(),
+            durable: false,
+            auto_delete: false,
+            internal: false,
+            arguments: FieldTable::new(),
+        };
+        let mut ex = DirectExchange::new(config);
+        ex.bind(Destination::Queue("q1".into()), "key1", &FieldTable::new());
+        ex.bind(Destination::Queue("q2".into()), "key1", &FieldTable::new());
+        ex.bind(Destination::Queue("q1".into()), "key2", &FieldTable::new());
+
+        let bindings = ex.bindings();
+        assert_eq!(bindings.len(), 3);
+    }
+
+    #[test]
+    fn test_unbind_destination_removes_all_keys() {
+        let config = ExchangeConfig {
+            name: "test".into(),
+            exchange_type: "direct".into(),
+            durable: false,
+            auto_delete: false,
+            internal: false,
+            arguments: FieldTable::new(),
+        };
+        let mut ex = DirectExchange::new(config);
+        let dest = Destination::Queue("q1".into());
+        ex.bind(dest.clone(), "key1", &FieldTable::new());
+        ex.bind(dest.clone(), "key2", &FieldTable::new());
+        ex.bind(Destination::Queue("q2".into()), "key1", &FieldTable::new());
+
+        assert_eq!(ex.binding_count(), 3);
+        ex.unbind_destination(&dest);
+        assert_eq!(ex.binding_count(), 1);
+        // q2 should still be bound
+        assert_eq!(ex.route("key1", None).len(), 1);
+    }
+
+    #[test]
+    fn test_fanout_unbind_destination() {
+        let mut ex = FanoutExchange::new(ExchangeConfig {
+            name: "test".into(),
+            exchange_type: "fanout".into(),
+            durable: false,
+            auto_delete: false,
+            internal: false,
+            arguments: FieldTable::new(),
+        });
+        ex.bind(Destination::Queue("q1".into()), "", &FieldTable::new());
+        ex.bind(Destination::Queue("q2".into()), "", &FieldTable::new());
+
+        ex.unbind_destination(&Destination::Queue("q1".into()));
+        assert_eq!(ex.binding_count(), 1);
+        let routes = ex.route("", None);
+        assert_eq!(routes.len(), 1);
+        assert!(routes.contains(&Destination::Queue("q2".into())));
+    }
+
+    #[test]
+    fn test_topic_unbind_destination() {
+        let mut ex = topic_exchange();
+        let dest = Destination::Queue("q1".into());
+        ex.bind(dest.clone(), "stock.*", &FieldTable::new());
+        ex.bind(dest.clone(), "bond.#", &FieldTable::new());
+        ex.bind(
+            Destination::Queue("q2".into()),
+            "stock.*",
+            &FieldTable::new(),
+        );
+
+        ex.unbind_destination(&dest);
+        assert_eq!(ex.binding_count(), 1);
+    }
+
+    #[test]
+    fn test_headers_unbind_destination() {
+        let mut ex = headers_exchange();
+        let mut args = FieldTable::new();
+        args.insert("x-match", FieldValue::ShortString("all".into()));
+        args.insert("format", FieldValue::ShortString("pdf".into()));
+        ex.bind(Destination::Queue("q1".into()), "", &args);
+        ex.bind(Destination::Queue("q2".into()), "", &args);
+
+        ex.unbind_destination(&Destination::Queue("q1".into()));
+        assert_eq!(ex.binding_count(), 1);
+    }
+
+    #[test]
+    fn test_unknown_exchange_type() {
+        let config = ExchangeConfig {
+            name: "bad".into(),
+            exchange_type: "nonexistent".into(),
+            durable: false,
+            auto_delete: false,
+            internal: false,
+            arguments: FieldTable::new(),
+        };
+        let result = create_exchange(config);
+        assert!(result.is_err());
     }
 }

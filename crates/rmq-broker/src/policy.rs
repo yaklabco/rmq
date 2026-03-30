@@ -66,10 +66,35 @@ impl EffectivePolicy {
     }
 }
 
+/// A policy with its pre-compiled regex for efficient matching.
+struct CompiledPolicy {
+    policy: Policy,
+    regex: Option<Regex>,
+}
+
+impl CompiledPolicy {
+    fn new(policy: Policy) -> Self {
+        let anchored = format!("^(?:{})$", policy.pattern);
+        let regex = Regex::new(&anchored).ok();
+        if regex.is_none() {
+            tracing::warn!(
+                "invalid regex pattern in policy '{}': {}",
+                policy.name,
+                policy.pattern
+            );
+        }
+        Self { policy, regex }
+    }
+
+    fn matches(&self, name: &str) -> bool {
+        self.regex.as_ref().map_or(false, |re| re.is_match(name))
+    }
+}
+
 /// Policy store that manages policies and computes effective policies.
 pub struct PolicyStore {
-    policies: Vec<Policy>,
-    operator_policies: Vec<Policy>,
+    policies: Vec<CompiledPolicy>,
+    operator_policies: Vec<CompiledPolicy>,
 }
 
 impl PolicyStore {
@@ -80,40 +105,41 @@ impl PolicyStore {
         }
     }
 
-    /// Add or update a user policy.
+    /// Add or update a user policy. The regex pattern is pre-compiled at this point.
     pub fn set_policy(&mut self, policy: Policy) {
-        self.policies.retain(|p| p.name != policy.name);
-        self.policies.push(policy);
+        self.policies.retain(|cp| cp.policy.name != policy.name);
+        self.policies.push(CompiledPolicy::new(policy));
     }
 
     /// Remove a user policy.
     pub fn remove_policy(&mut self, name: &str) -> bool {
         let len = self.policies.len();
-        self.policies.retain(|p| p.name != name);
+        self.policies.retain(|cp| cp.policy.name != name);
         self.policies.len() < len
     }
 
-    /// Add or update an operator policy.
+    /// Add or update an operator policy. The regex pattern is pre-compiled at this point.
     pub fn set_operator_policy(&mut self, policy: Policy) {
-        self.operator_policies.retain(|p| p.name != policy.name);
-        self.operator_policies.push(policy);
+        self.operator_policies
+            .retain(|cp| cp.policy.name != policy.name);
+        self.operator_policies.push(CompiledPolicy::new(policy));
     }
 
     /// Remove an operator policy.
     pub fn remove_operator_policy(&mut self, name: &str) -> bool {
         let len = self.operator_policies.len();
-        self.operator_policies.retain(|p| p.name != name);
+        self.operator_policies.retain(|cp| cp.policy.name != name);
         self.operator_policies.len() < len
     }
 
     /// List all user policies.
-    pub fn policies(&self) -> &[Policy] {
-        &self.policies
+    pub fn policies(&self) -> Vec<&Policy> {
+        self.policies.iter().map(|cp| &cp.policy).collect()
     }
 
     /// List all operator policies.
-    pub fn operator_policies(&self) -> &[Policy] {
-        &self.operator_policies
+    pub fn operator_policies(&self) -> Vec<&Policy> {
+        self.operator_policies.iter().map(|cp| &cp.policy).collect()
     }
 
     /// Compute the effective policy for a queue.
@@ -130,15 +156,13 @@ impl PolicyStore {
         let mut result = HashMap::new();
 
         // Find the highest-priority matching user policy
-        if let Some(policy) = self.find_matching_policy(&self.policies, name, &resource_type) {
-            result.extend(policy.definition.clone());
+        if let Some(cp) = self.find_matching_policy(&self.policies, name, &resource_type) {
+            result.extend(cp.policy.definition.clone());
         }
 
         // Operator policies override specific keys
-        if let Some(op_policy) =
-            self.find_matching_policy(&self.operator_policies, name, &resource_type)
-        {
-            for (key, value) in &op_policy.definition {
+        if let Some(cp) = self.find_matching_policy(&self.operator_policies, name, &resource_type) {
+            for (key, value) in &cp.policy.definition {
                 // Only allow operator-safe keys
                 if is_operator_key(key) {
                     result.insert(key.clone(), value.clone());
@@ -151,35 +175,40 @@ impl PolicyStore {
 
     fn find_matching_policy<'a>(
         &self,
-        policies: &'a [Policy],
+        policies: &'a [CompiledPolicy],
         name: &str,
         resource_type: &ApplyTo,
-    ) -> Option<&'a Policy> {
+    ) -> Option<&'a CompiledPolicy> {
         policies
             .iter()
-            .filter(|p| {
+            .filter(|cp| {
                 // Check apply-to matches
-                match (&p.apply_to, resource_type) {
+                match (&cp.policy.apply_to, resource_type) {
                     (ApplyTo::All, _) => true,
                     (ApplyTo::Queues, ApplyTo::Queues) => true,
                     (ApplyTo::Exchanges, ApplyTo::Exchanges) => true,
                     _ => false,
                 }
             })
-            .filter(|p| {
-                // Check regex pattern matches
-                let anchored = format!("^(?:{})$", p.pattern);
-                Regex::new(&anchored)
-                    .map(|re| re.is_match(name))
-                    .unwrap_or(false)
-            })
-            .max_by_key(|p| p.priority)
+            .filter(|cp| cp.matches(name))
+            .max_by_key(|cp| cp.policy.priority)
     }
 }
 
 impl Default for PolicyStore {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Number of policies.
+impl PolicyStore {
+    pub fn policy_count(&self) -> usize {
+        self.policies.len()
+    }
+
+    pub fn operator_policy_count(&self) -> usize {
+        self.operator_policies.len()
     }
 }
 

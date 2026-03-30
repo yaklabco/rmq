@@ -44,6 +44,10 @@ pub struct DeadLetter {
 /// Fast-path ring buffer capacity.
 const FAST_PATH_CAPACITY: usize = 131072;
 
+/// Maximum number of entries in the channel_delivered tracking set.
+/// When exceeded, a warning is logged indicating a possible consumer leak.
+const CHANNEL_DELIVERED_LIMIT: usize = 100_000;
+
 /// A message queue with a fast-path delivery channel.
 ///
 /// Design:
@@ -300,9 +304,18 @@ impl Queue {
             // Track this position so the store fallback skips it.
             // Don't ack in the store yet — the consumer hasn't acked.
             // If the consumer disconnects, ServerChannel::Drop requeues it.
-            self.channel_delivered
-                .lock()
-                .insert((env.segment_position.segment, env.segment_position.position));
+            {
+                let mut delivered = self.channel_delivered.lock();
+                if delivered.len() >= CHANNEL_DELIVERED_LIMIT {
+                    tracing::warn!(
+                        "queue '{}': channel_delivered set reached limit of {} entries, \
+                         possible consumer leak",
+                        self.config.name,
+                        CHANNEL_DELIVERED_LIMIT
+                    );
+                }
+                delivered.insert((env.segment_position.segment, env.segment_position.position));
+            }
             return Ok((Some(env), vec![]));
         }
 
@@ -568,7 +581,7 @@ fn get_arg_string(args: &FieldTable, key: &str) -> Option<String> {
 fn now_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_millis() as u64
 }
 
