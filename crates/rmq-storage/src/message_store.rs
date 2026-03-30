@@ -10,7 +10,7 @@ use rmq_protocol::properties::BasicProperties;
 
 use crate::ack_store::AckStore;
 use crate::message::StoredMessage;
-use crate::mmap_segment::{DEFAULT_SEGMENT_SIZE, MmapSegment};
+use crate::mmap_segment::{DEFAULT_SEGMENT_SIZE, MmapSegment, SEGMENT_HEADER_SIZE};
 use crate::requeued_store::RequeuedStore;
 use crate::segment_position::SegmentPosition;
 
@@ -217,13 +217,76 @@ impl MessageStore {
     /// Sync all data to disk (fsync). Guarantees all writes and acks
     /// survive process crash and power failure.
     pub fn sync(&mut self) -> io::Result<()> {
-        if let Some(ref seg) = self.write_segment {
-            seg.flush()?; // msync for mmap
+        if let Some(ref mut seg) = self.write_segment {
+            seg.flush()?; // msync for mmap (also updates header)
         }
         for ack in self.ack_stores.values_mut() {
             ack.sync()?; // fsync for ack files
         }
         Ok(())
+    }
+
+    /// Remove segments where all messages have been acknowledged.
+    /// Returns the number of bytes freed on disk.
+    pub fn gc(&mut self) -> io::Result<u64> {
+        let mut bytes_freed = 0u64;
+        let mut segments_to_remove = Vec::new();
+
+        for (&seg_id, index) in &self.segment_indices {
+            // Never GC the active write segment
+            if seg_id == self.write_segment_id {
+                continue;
+            }
+
+            // Check if all messages in this segment are acked
+            if let Some(ack_store) = self.ack_stores.get(&seg_id) {
+                let all_acked = index
+                    .entries
+                    .iter()
+                    .all(|&(pos, _)| ack_store.is_acked(pos));
+
+                if all_acked && !index.entries.is_empty() {
+                    segments_to_remove.push(seg_id);
+                }
+            }
+        }
+
+        for seg_id in segments_to_remove {
+            // Get file size before removing
+            let seg_path = self.segment_path(seg_id);
+            if seg_path.exists() {
+                let metadata = fs::metadata(&seg_path)?;
+                bytes_freed += metadata.len();
+            }
+
+            // Remove read segment (drops the mmap)
+            self.read_segments.remove(&seg_id);
+
+            // Remove the segment file
+            if seg_path.exists() {
+                fs::remove_file(&seg_path)?;
+            }
+
+            // Remove the ack file
+            if let Some(ack_store) = self.ack_stores.remove(&seg_id) {
+                let ack_path = ack_store.path().to_path_buf();
+                drop(ack_store);
+                if ack_path.exists() {
+                    fs::remove_file(&ack_path)?;
+                }
+            }
+
+            // Remove the segment index
+            self.segment_indices.remove(&seg_id);
+
+            // If read pointer was pointing at this segment, advance it
+            if self.read_segment_id == seg_id {
+                self.read_segment_id = seg_id + 1;
+                self.read_position = 0;
+            }
+        }
+
+        Ok(bytes_freed)
     }
 
     // --- Private ---
@@ -244,7 +307,7 @@ impl MessageStore {
     }
 
     fn rotate_segment(&mut self) -> io::Result<()> {
-        if let Some(seg) = self.write_segment.take() {
+        if let Some(mut seg) = self.write_segment.take() {
             seg.flush()?;
             // Move to read segments cache
             let old_id = self.write_segment_id;
@@ -271,8 +334,7 @@ impl MessageStore {
                     format!("segment {segment_id} not found"),
                 ));
             }
-            let metadata = fs::metadata(&path)?;
-            let seg = MmapSegment::open_read(&path, metadata.len() as usize)?;
+            let seg = MmapSegment::open_read(&path, None)?;
             self.read_segments.insert(segment_id, seg);
         }
 
@@ -303,7 +365,6 @@ impl MessageStore {
             // touching the mmap data at all
             if let Some(index) = self.segment_indices.get(&read_seg_id) {
                 let start_idx = index.find_from(read_pos);
-                let _found = false;
 
                 for &(pos, bytesize) in &index.entries[start_idx..] {
                     if self.is_acked(read_seg_id, pos) {
@@ -312,14 +373,17 @@ impl MessageStore {
                         continue;
                     }
 
-                    // Found un-acked message — read its data
-                    let data = self.read_segment_data(read_seg_id, pos, bytesize as usize)?;
+                    // Found un-acked message — read its data directly from the
+                    // segment mmap without copying to a Vec.
+                    self.ensure_read_segment(read_seg_id)?;
+
+                    let data = self.segment_data_ref(read_seg_id, pos, bytesize as usize);
                     let data = match data {
                         Some(d) => d,
                         None => break,
                     };
 
-                    let message = decode_message(&data)?;
+                    let message = decode_message(data)?;
                     self.read_position = pos + bytesize;
 
                     return Ok(Some(Envelope {
@@ -364,7 +428,7 @@ impl MessageStore {
                 return Ok(None);
             }
 
-            let data = self.read_segment_data(read_seg_id, read_pos, remaining)?;
+            let data = self.segment_data_ref(read_seg_id, read_pos, remaining);
             let data = match data {
                 Some(d) => d,
                 None => {
@@ -372,7 +436,7 @@ impl MessageStore {
                 }
             };
 
-            let msg_size = peek_message_size(&data)?;
+            let msg_size = peek_message_size(data)?;
             if msg_size == 0 || msg_size > remaining {
                 return Ok(None);
             }
@@ -407,30 +471,22 @@ impl MessageStore {
         if !path.exists() {
             return Ok(None);
         }
-        let metadata = fs::metadata(&path)?;
-        let seg = MmapSegment::open_read(&path, metadata.len() as usize)?;
+        let seg = MmapSegment::open_read(&path, None)?;
         let size = seg.size();
         self.read_segments.insert(segment_id, seg);
         Ok(Some(size))
     }
 
-    /// Read and copy segment data to a Vec to avoid borrow issues.
-    fn read_segment_data(
-        &self,
-        segment_id: u32,
-        position: u32,
-        len: usize,
-    ) -> io::Result<Option<Vec<u8>>> {
+    /// Get a shared reference to segment data without copying.
+    /// The segment must already be loaded via `ensure_read_segment`.
+    fn segment_data_ref(&self, segment_id: u32, position: u32, len: usize) -> Option<&[u8]> {
         let seg = if segment_id == self.write_segment_id {
             self.write_segment.as_ref()
         } else {
             self.read_segments.get(&segment_id)
         };
 
-        match seg {
-            Some(seg) => Ok(seg.read(position, len).map(|s| s.to_vec())),
-            None => Ok(None),
-        }
+        seg.and_then(|s| s.read(position, len))
     }
 
     fn load_existing(&mut self) -> io::Result<()> {
@@ -470,16 +526,31 @@ impl MessageStore {
         self.read_segment_id = *segment_ids.first().unwrap();
         self.read_position = 0;
 
-        // Open the write segment
+        // Open the write segment using header-based recovery
         let write_path = self.segment_path(last_id);
-        let metadata = fs::metadata(&write_path)?;
-        let seg = MmapSegment::open_read(&write_path, metadata.len() as usize)?;
+        let seg = MmapSegment::open_read(&write_path, None)?;
         self.write_segment = Some(seg);
 
-        // Count messages and build segment indices (scan all segments)
+        // Count messages and build segment indices (scan all segments).
+        // Use the header-recorded valid offset to limit the scan, so that
+        // unflushed data written after the last sync is ignored (crash recovery).
         for &id in &segment_ids {
             let seg_path = self.segment_path(id);
-            let data = fs::read(&seg_path)?;
+            let file_data = fs::read(&seg_path)?;
+
+            if file_data.len() <= SEGMENT_HEADER_SIZE {
+                continue;
+            }
+
+            // Read valid offset from the segment header
+            let header_bytes: [u8; 8] = file_data[..SEGMENT_HEADER_SIZE]
+                .try_into()
+                .map_err(|_| io::Error::other("invalid segment header"))?;
+            let valid_offset = u64::from_le_bytes(header_bytes) as usize;
+            let valid_data_len = valid_offset.min(file_data.len() - SEGMENT_HEADER_SIZE);
+
+            let data = &file_data[SEGMENT_HEADER_SIZE..SEGMENT_HEADER_SIZE + valid_data_len];
+
             let mut offset = 0usize;
             let mut index = SegmentIndex::new();
             while offset < data.len() {
@@ -768,6 +839,98 @@ mod tests {
 
             let env = store.shift().unwrap().unwrap();
             assert_eq!(&env.message.body[..], b"persistent-2");
+        }
+    }
+
+    #[test]
+    fn test_segment_gc() {
+        let dir = TempDir::new().unwrap();
+        // Small segments to force rotation
+        let mut store = MessageStore::new(dir.path(), 128).unwrap();
+
+        // Push messages across multiple segments
+        let mut positions = Vec::new();
+        for i in 0..10 {
+            let sp = store.push(&test_message(&format!("msg {i}"))).unwrap();
+            positions.push(sp);
+        }
+
+        // Verify multiple segments were created
+        assert!(store.write_segment_id > 1);
+        let initial_segment_count = store.segment_indices.len();
+
+        // Ack all messages in segments before the write segment
+        for sp in &positions {
+            if sp.segment < store.write_segment_id {
+                store.ack(sp).unwrap();
+            }
+        }
+
+        // Run GC
+        let freed = store.gc().unwrap();
+        assert!(freed > 0, "expected some bytes to be freed");
+
+        // Verify segments were removed
+        assert!(
+            store.segment_indices.len() < initial_segment_count,
+            "expected fewer segments after GC"
+        );
+
+        // Verify remaining messages are still accessible
+        for sp in &positions {
+            if sp.segment == store.write_segment_id {
+                let msg = store.read_at(sp).unwrap();
+                assert!(std::str::from_utf8(&msg.body).unwrap().starts_with("msg "));
+            }
+        }
+    }
+
+    #[test]
+    fn test_gc_does_not_remove_active_segment() {
+        let dir = TempDir::new().unwrap();
+        let mut store = MessageStore::new(dir.path(), 4096).unwrap();
+
+        let sp = store.push(&test_message("only message")).unwrap();
+        store.ack(&sp).unwrap();
+
+        // GC should not remove the write segment even if all messages are acked
+        let freed = store.gc().unwrap();
+        assert_eq!(freed, 0);
+    }
+
+    #[test]
+    fn test_crash_recovery_round_trip() {
+        let dir = TempDir::new().unwrap();
+
+        // Write some messages and sync (updating the header)
+        {
+            let mut store = MessageStore::new(dir.path(), 4096).unwrap();
+            store.push(&test_message("survived-1")).unwrap();
+            store.push(&test_message("survived-2")).unwrap();
+            store.sync().unwrap();
+            // Don't flush after this one — simulates a crash.
+            store.push(&test_message("lost-after-crash")).unwrap();
+            // Leak the store to simulate a process crash (no Drop runs).
+            // In a real crash the kernel discards dirty pages that were
+            // never msync'd, so the unflushed message is lost.
+            std::mem::forget(store);
+        }
+
+        // Reopen — should recover using the header offset.
+        // The file on disk still has the full capacity (not truncated,
+        // because Drop didn't run), but the header records the valid
+        // offset after the second sync.
+        {
+            let mut store = MessageStore::new(dir.path(), 4096).unwrap();
+            assert_eq!(store.message_count(), 2);
+
+            let env = store.shift().unwrap().unwrap();
+            assert_eq!(&env.message.body[..], b"survived-1");
+
+            let env = store.shift().unwrap().unwrap();
+            assert_eq!(&env.message.body[..], b"survived-2");
+
+            assert!(store.shift().unwrap().is_none());
         }
     }
 }
