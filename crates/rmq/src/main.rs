@@ -110,7 +110,15 @@ async fn main() -> anyhow::Result<()> {
         let tls_bind = cli.tls_bind;
         info!("AMQPS (TLS) bind: {}", tls_bind);
         tokio::spawn(async move {
-            if let Err(e) = listener::run_tls(tls_bind, tls_vhost, tls_users, tls_acceptor).await {
+            if let Err(e) = listener::run_tls(
+                tls_bind,
+                tls_vhost,
+                tls_users,
+                tls_acceptor,
+                listener::DEFAULT_MAX_CONNECTIONS,
+            )
+            .await
+            {
                 tracing::error!("AMQPS listener error: {e}");
             }
         });
@@ -138,6 +146,7 @@ async fn main() -> anyhow::Result<()> {
     // Start AMQP listener (blocks)
     let config = ListenerConfig {
         bind_addr: cli.bind,
+        ..Default::default()
     };
     listener::run(config, vhost, user_store).await?;
 
