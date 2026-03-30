@@ -2,7 +2,12 @@
 targets = []
 
 [advisories]
-ignore = []
+ignore = [
+    # Pre-existing: `instant` is unmaintained (transitive dep via lapin)
+    "RUSTSEC-2024-0384",
+    # Pre-existing: rustls-pemfile is unmaintained (will be resolved when lapin updates)
+    "RUSTSEC-2025-0134",
+]
 
 [licenses]
 allow = [
