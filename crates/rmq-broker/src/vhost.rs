@@ -116,6 +116,7 @@ fn field_value_to_json(value: &FieldValue) -> serde_json::Value {
             serde_json::json!({"type": "array", "value": items})
         }
         FieldValue::Void => serde_json::Value::Null,
+        _ => serde_json::Value::Null,
     }
 }
 
