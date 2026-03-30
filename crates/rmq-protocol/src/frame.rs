@@ -15,6 +15,7 @@ pub struct AMQPFrame {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum FramePayload {
     Method(MethodFrame),
     Header(ContentHeader),
@@ -32,6 +33,7 @@ pub struct ContentHeader {
 
 /// All supported AMQP method frames.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum MethodFrame {
     // Connection
     ConnectionStart(ConnectionStart),

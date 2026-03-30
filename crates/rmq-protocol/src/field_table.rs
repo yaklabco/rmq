@@ -81,6 +81,7 @@ impl FieldTable {
 
 /// AMQP field value types.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum FieldValue {
     Bool(bool),
     I8(i8),

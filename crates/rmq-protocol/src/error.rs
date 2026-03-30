@@ -1,6 +1,7 @@
 use thiserror::Error;
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ProtocolError {
     #[error("invalid protocol header")]
     InvalidHeader,

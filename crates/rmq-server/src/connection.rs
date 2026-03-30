@@ -148,9 +148,18 @@ impl Connection {
 
         // Send Connection.Start
         let mut server_properties = FieldTable::new();
-        server_properties.insert("product", FieldValue::ShortString("RMQ".into()));
-        server_properties.insert("version", FieldValue::ShortString("0.1.0".into()));
-        server_properties.insert("platform", FieldValue::ShortString("Rust/Tokio".into()));
+        server_properties.insert(
+            "product",
+            FieldValue::LongString(Bytes::from_static(b"RMQ")),
+        );
+        server_properties.insert(
+            "version",
+            FieldValue::LongString(Bytes::from_static(b"0.1.0")),
+        );
+        server_properties.insert(
+            "platform",
+            FieldValue::LongString(Bytes::from_static(b"Rust/Tokio")),
+        );
 
         let mut capabilities = FieldTable::new();
         capabilities.insert("publisher_confirms", FieldValue::Bool(true));
@@ -467,10 +476,12 @@ fn extract_credentials(mechanism: &str, response: &[u8]) -> Option<(String, Stri
             let table = FieldTable::decode(&mut buf).ok()?;
             let login = match table.get("LOGIN") {
                 Some(FieldValue::ShortString(s)) => s.clone(),
+                Some(FieldValue::LongString(b)) => std::str::from_utf8(b).ok()?.to_string(),
                 _ => return None,
             };
             let password = match table.get("PASSWORD") {
                 Some(FieldValue::ShortString(s)) => s.clone(),
+                Some(FieldValue::LongString(b)) => std::str::from_utf8(b).ok()?.to_string(),
                 _ => return None,
             };
             Some((login, password))

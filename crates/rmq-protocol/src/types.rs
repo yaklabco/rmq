@@ -136,28 +136,69 @@ pub enum ReplyCode {
     InternalError = 541,
 }
 
-impl ReplyCode {
-    pub fn from_u16(code: u16) -> Option<Self> {
+impl TryFrom<u16> for ReplyCode {
+    type Error = u16;
+
+    fn try_from(code: u16) -> Result<Self, Self::Error> {
         match code {
-            200 => Some(Self::Success),
-            311 => Some(Self::ContentTooLarge),
-            313 => Some(Self::NoConsumers),
-            320 => Some(Self::ConnectionForced),
-            402 => Some(Self::InvalidPath),
-            403 => Some(Self::AccessRefused),
-            404 => Some(Self::NotFound),
-            405 => Some(Self::ResourceLocked),
-            406 => Some(Self::PreconditionFailed),
-            501 => Some(Self::FrameError),
-            502 => Some(Self::SyntaxError),
-            503 => Some(Self::CommandInvalid),
-            504 => Some(Self::ChannelError),
-            505 => Some(Self::UnexpectedFrame),
-            506 => Some(Self::ResourceError),
-            530 => Some(Self::NotAllowed),
-            540 => Some(Self::NotImplemented),
-            541 => Some(Self::InternalError),
-            _ => None,
+            200 => Ok(Self::Success),
+            311 => Ok(Self::ContentTooLarge),
+            313 => Ok(Self::NoConsumers),
+            320 => Ok(Self::ConnectionForced),
+            402 => Ok(Self::InvalidPath),
+            403 => Ok(Self::AccessRefused),
+            404 => Ok(Self::NotFound),
+            405 => Ok(Self::ResourceLocked),
+            406 => Ok(Self::PreconditionFailed),
+            501 => Ok(Self::FrameError),
+            502 => Ok(Self::SyntaxError),
+            503 => Ok(Self::CommandInvalid),
+            504 => Ok(Self::ChannelError),
+            505 => Ok(Self::UnexpectedFrame),
+            506 => Ok(Self::ResourceError),
+            530 => Ok(Self::NotAllowed),
+            540 => Ok(Self::NotImplemented),
+            541 => Ok(Self::InternalError),
+            _ => Err(code),
         }
+    }
+}
+
+impl ReplyCode {
+    /// Deprecated: use `ReplyCode::try_from(code)` instead.
+    #[deprecated(since = "0.2.0", note = "use TryFrom<u16> instead")]
+    pub fn from_u16(code: u16) -> Option<Self> {
+        Self::try_from(code).ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_reply_code_try_from_valid() {
+        assert_eq!(ReplyCode::try_from(200u16), Ok(ReplyCode::Success));
+        assert_eq!(ReplyCode::try_from(404u16), Ok(ReplyCode::NotFound));
+        assert_eq!(ReplyCode::try_from(541u16), Ok(ReplyCode::InternalError));
+    }
+
+    #[test]
+    fn test_reply_code_try_from_invalid() {
+        assert_eq!(ReplyCode::try_from(0u16), Err(0u16));
+        assert_eq!(ReplyCode::try_from(999u16), Err(999u16));
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn test_reply_code_from_u16_deprecated_wrapper() {
+        assert_eq!(ReplyCode::from_u16(200), Some(ReplyCode::Success));
+        assert_eq!(ReplyCode::from_u16(999), None);
+    }
+
+    #[test]
+    fn test_reply_code_repr() {
+        assert_eq!(ReplyCode::Success as u16, 200);
+        assert_eq!(ReplyCode::NotFound as u16, 404);
     }
 }

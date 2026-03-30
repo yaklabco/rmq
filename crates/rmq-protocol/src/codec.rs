@@ -17,6 +17,7 @@ pub struct AMQPCodec {
 
 /// Items produced by the decoder.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum AMQPCodecItem {
     /// The initial AMQP protocol header from the client.
     ProtocolHeader,
