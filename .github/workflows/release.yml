@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 jobs:
   check-version:
@@ -24,7 +25,7 @@ jobs:
         id: detect
         run: |
           # Extract first versioned heading: ## [x.y.z]
-          VERSION=$(grep -m1 '^## \[[0-9]' CHANGELOG.md | sed 's/## \[\(.*\)\].*/\1/')
+          VERSION=$(grep -m1 '^## \[[0-9]' CHANGELOG.md | sed 's/## \[\(.*\)\].*/\1/' || true)
 
           if [ -z "$VERSION" ]; then
             echo "No versioned release found in CHANGELOG.md"
@@ -43,9 +44,8 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "should_release=true" >> "$GITHUB_OUTPUT"
 
-          # Extract release notes (content between this version and next heading)
+          # Extract release notes
           NOTES=$(awk "/^## \[$VERSION\]/{found=1; next} /^## \[/{if(found) exit} found" CHANGELOG.md)
-          # Escape for multiline output
           {
             echo "release_notes<<NOTES_EOF"
             echo "$NOTES"
@@ -96,12 +96,13 @@ jobs:
 
       - name: Install zigbuild
         if: matrix.cross
-        run: |
-          pip3 install ziglang
-          cargo install cargo-zigbuild
+        uses: mlugg/setup-zig@v2
+      - name: Install cargo-zigbuild
+        if: matrix.cross
+        run: cargo install cargo-zigbuild
 
       - name: Build (native)
-        if: "!matrix.cross"
+        if: ${{ !matrix.cross }}
         run: cargo build --release --target ${{ matrix.target }} -p rmq -p rmq-perf
 
       - name: Build (cross)
@@ -123,6 +124,7 @@ jobs:
   release:
     name: Create GitHub Release
     needs: [check-version, build]
+    if: needs.check-version.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -149,6 +151,31 @@ jobs:
     name: Docker Image
     needs: [check-version, create-tag]
     if: needs.check-version.outputs.should_release == 'true'
-    uses: ./.github/workflows/docker.yml
-    with:
-      version: ${{ needs.check-version.outputs.version }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/yaklabco/rmq:${{ needs.check-version.outputs.version }}
+            ghcr.io/yaklabco/rmq:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
