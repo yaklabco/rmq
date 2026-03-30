@@ -85,50 +85,63 @@ pub async fn run_shovel(
             }
         };
 
-        match queue.shift() {
-            Ok((Some(env), _dead_letters)) => {
-                backoff = Duration::from_millis(100); // reset on success
-
-                // Re-publish to destination
-                let msg = StoredMessage {
-                    timestamp: env.message.timestamp,
-                    exchange: config.dest_exchange.clone(),
-                    routing_key: config.dest_routing_key.clone(),
-                    properties: env.message.properties.clone(),
-                    body: env.message.body.clone(),
-                };
-
-                match vhost.publish(&config.dest_exchange, &config.dest_routing_key, &msg) {
-                    Ok(_) => {
-                        // Ack source
-                        if config.ack_mode != AckMode::NoAck {
-                            let _ = queue.ack(&env.segment_position);
-                        }
-                        transferred += 1;
-                        debug!(
-                            "shovel '{}': transferred message #{}",
-                            config.name, transferred
-                        );
-                    }
-                    Err(e) => {
-                        warn!("shovel '{}': publish failed: {e}, requeueing", config.name);
-                        queue.requeue(env.segment_position);
-                        tokio::time::sleep(backoff).await;
-                        backoff = (backoff * 2).min(max_backoff);
-                    }
-                }
-            }
-            Ok((None, _)) => {
-                // Wait for a message or cancellation
-                tokio::select! {
-                    _ = queue.wait_for_message() => {}
-                    _ = cancel.changed() => { break; }
-                }
-            }
+        // Batch-consume up to `prefetch` messages
+        let (envelopes, _dead_letters) = match queue.shift_batch(config.prefetch as usize) {
+            Ok(result) => result,
             Err(e) => {
-                error!("shovel '{}': shift error: {e}", config.name);
+                error!("shovel '{}': shift_batch error: {e}", config.name);
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(max_backoff);
+                continue;
+            }
+        };
+
+        if envelopes.is_empty() {
+            // Wait for a message or cancellation
+            tokio::select! {
+                _ = queue.wait_for_message() => {}
+                _ = cancel.changed() => { break; }
+            }
+            continue;
+        }
+
+        backoff = Duration::from_millis(100); // reset on success
+
+        for env in envelopes {
+            // OnPublish: ack BEFORE publishing (at-most-once)
+            if config.ack_mode == AckMode::OnPublish {
+                let _ = queue.ack(&env.segment_position);
+            }
+
+            let msg = StoredMessage {
+                timestamp: env.message.timestamp,
+                exchange: config.dest_exchange.clone(),
+                routing_key: config.dest_routing_key.clone(),
+                properties: env.message.properties.clone(),
+                body: env.message.body.clone(),
+            };
+
+            match vhost.publish(&config.dest_exchange, &config.dest_routing_key, &msg) {
+                Ok(_) => {
+                    // OnConfirm: ack after successful publish
+                    if config.ack_mode == AckMode::OnConfirm {
+                        let _ = queue.ack(&env.segment_position);
+                    }
+                    transferred += 1;
+                    debug!(
+                        "shovel '{}': transferred message #{}",
+                        config.name, transferred
+                    );
+                }
+                Err(e) => {
+                    warn!("shovel '{}': publish failed: {e}, requeueing", config.name);
+                    // Only requeue if we haven't already acked (OnPublish mode loses messages)
+                    if config.ack_mode != AckMode::OnPublish {
+                        queue.requeue(env.segment_position);
+                    }
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(max_backoff);
+                }
             }
         }
     }
@@ -276,6 +289,116 @@ mod tests {
         cancel_tx.send(true).unwrap();
         let transferred = handle.await.unwrap();
         assert_eq!(transferred, 1);
+    }
+
+    #[tokio::test]
+    async fn test_shovel_on_publish_ack_mode() {
+        let dir = TempDir::new().unwrap();
+        let vhost = setup_vhost(dir.path());
+
+        vhost
+            .declare_queue(QueueConfig {
+                name: "op-src".into(),
+                durable: false,
+                exclusive: false,
+                auto_delete: false,
+                arguments: FieldTable::new(),
+            })
+            .unwrap();
+        vhost
+            .declare_queue(QueueConfig {
+                name: "op-dest".into(),
+                durable: false,
+                exclusive: false,
+                auto_delete: false,
+                arguments: FieldTable::new(),
+            })
+            .unwrap();
+        vhost
+            .bind_queue("op-dest", "amq.direct", "op-key", &FieldTable::new())
+            .unwrap();
+
+        let src = vhost.get_queue("op-src").unwrap();
+        for i in 0..3 {
+            src.publish(&make_msg(&format!("op-msg-{i}"))).unwrap();
+        }
+
+        let config = ShovelConfig {
+            name: "on-publish-shovel".into(),
+            src_queue: "op-src".into(),
+            dest_exchange: "amq.direct".into(),
+            dest_routing_key: "op-key".into(),
+            prefetch: 10,
+            ack_mode: AckMode::OnPublish,
+            reconnect_delay_max: 1,
+        };
+
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let vhost_clone = vhost.clone();
+        let handle = tokio::spawn(async move { run_shovel(vhost_clone, &config, cancel_rx).await });
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        cancel_tx.send(true).unwrap();
+        let transferred = handle.await.unwrap();
+        assert_eq!(transferred, 3);
+
+        // Verify messages arrived at destination
+        let dest = vhost.get_queue("op-dest").unwrap();
+        let (env, _) = dest.shift().unwrap();
+        assert_eq!(&env.unwrap().message.body[..], b"op-msg-0");
+    }
+
+    #[tokio::test]
+    async fn test_shovel_prefetch_batching() {
+        let dir = TempDir::new().unwrap();
+        let vhost = setup_vhost(dir.path());
+
+        vhost
+            .declare_queue(QueueConfig {
+                name: "pf-src".into(),
+                durable: false,
+                exclusive: false,
+                auto_delete: false,
+                arguments: FieldTable::new(),
+            })
+            .unwrap();
+        vhost
+            .declare_queue(QueueConfig {
+                name: "pf-dest".into(),
+                durable: false,
+                exclusive: false,
+                auto_delete: false,
+                arguments: FieldTable::new(),
+            })
+            .unwrap();
+        vhost
+            .bind_queue("pf-dest", "amq.direct", "pf-key", &FieldTable::new())
+            .unwrap();
+
+        let src = vhost.get_queue("pf-src").unwrap();
+        for i in 0..10 {
+            src.publish(&make_msg(&format!("pf-msg-{i}"))).unwrap();
+        }
+
+        // Use prefetch of 5 — should still transfer all 10 over multiple batches
+        let config = ShovelConfig {
+            name: "prefetch-shovel".into(),
+            src_queue: "pf-src".into(),
+            dest_exchange: "amq.direct".into(),
+            dest_routing_key: "pf-key".into(),
+            prefetch: 5,
+            ack_mode: AckMode::OnConfirm,
+            reconnect_delay_max: 1,
+        };
+
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let vhost_clone = vhost.clone();
+        let handle = tokio::spawn(async move { run_shovel(vhost_clone, &config, cancel_rx).await });
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        cancel_tx.send(true).unwrap();
+        let transferred = handle.await.unwrap();
+        assert_eq!(transferred, 10);
     }
 
     #[tokio::test]
