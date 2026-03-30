@@ -8,9 +8,14 @@ use memmap2::MmapMut;
 pub const DEFAULT_SEGMENT_SIZE: usize = 8 * 1024 * 1024;
 
 /// A memory-mapped append-only segment file.
+///
+/// The mmap field is `Option<MmapMut>` so that the `Drop` impl can take
+/// ownership of the mapping and unmap it before truncating the file.
+/// This avoids undefined behavior from truncating a file while it is
+/// still memory-mapped.
 pub struct MmapSegment {
     path: PathBuf,
-    mmap: MmapMut,
+    mmap: Option<MmapMut>,
     /// Current write position (also the size of valid data).
     size: usize,
     /// Total capacity of the file.
@@ -29,6 +34,11 @@ impl MmapSegment {
             .open(&path)?;
         file.set_len(capacity as u64)?;
 
+        // SAFETY: The file was just created and sized to `capacity` bytes.
+        // The mapping is valid for the lifetime of `MmapMut`. We hold the
+        // file open only during map creation; the OS keeps the mapping alive
+        // independently. No other process is expected to truncate the file
+        // while we hold the mapping (single-writer invariant).
         let mmap = unsafe { MmapMut::map_mut(&file)? };
 
         // Hint the kernel for sequential write access
@@ -39,7 +49,7 @@ impl MmapSegment {
 
         Ok(Self {
             path,
-            mmap,
+            mmap: Some(mmap),
             size: 0,
             capacity,
         })
@@ -52,14 +62,34 @@ impl MmapSegment {
         let metadata = file.metadata()?;
         let capacity = metadata.len() as usize;
 
+        // SAFETY: The file exists and has been opened read+write. The mapping
+        // covers the full file length. We rely on the single-writer invariant:
+        // no other process will truncate the file while mapped.
         let mmap = unsafe { MmapMut::map_mut(&file)? };
 
         Ok(Self {
             path,
-            mmap,
+            mmap: Some(mmap),
             size: valid_size,
             capacity,
         })
+    }
+
+    /// Return a reference to the inner mmap.
+    ///
+    /// # Panics
+    /// Panics if called after the mmap has been taken (only possible during drop).
+    fn mmap(&self) -> &MmapMut {
+        self.mmap
+            .as_ref()
+            .expect("mmap accessed after drop started")
+    }
+
+    /// Return a mutable reference to the inner mmap.
+    fn mmap_mut(&mut self) -> &mut MmapMut {
+        self.mmap
+            .as_mut()
+            .expect("mmap accessed after drop started")
     }
 
     /// Append data to the segment. Returns the position where data was written.
@@ -69,8 +99,10 @@ impl MmapSegment {
             return Err(io::Error::other("segment capacity exceeded"));
         }
         let pos = self.size as u32;
-        self.mmap[self.size..self.size + data.len()].copy_from_slice(data);
-        self.size += data.len();
+        let start = self.size;
+        let end = start + data.len();
+        self.mmap_mut()[start..end].copy_from_slice(data);
+        self.size = end;
         Ok(pos)
     }
 
@@ -89,12 +121,12 @@ impl MmapSegment {
         if end > self.size {
             return None;
         }
-        Some(&self.mmap[start..end])
+        Some(&self.mmap()[start..end])
     }
 
     /// Get a slice of the valid data region.
     pub fn as_slice(&self) -> &[u8] {
-        &self.mmap[..self.size]
+        &self.mmap()[..self.size]
     }
 
     /// Current write position / valid data size.
@@ -119,20 +151,26 @@ impl MmapSegment {
 
     /// Flush changes to disk (async msync).
     pub fn flush_async(&self) -> io::Result<()> {
-        self.mmap.flush_async()
+        self.mmap().flush_async()
     }
 
     /// Flush changes to disk (sync msync).
     pub fn flush(&self) -> io::Result<()> {
-        self.mmap.flush()
+        self.mmap().flush()
     }
 
     /// Advise the kernel that we're done with this region (for read segments
     /// that have been fully consumed). Frees page cache.
     #[cfg(unix)]
     pub fn advise_dontneed(&self) -> io::Result<()> {
+        // SAFETY: DontNeed is an advisory hint. The kernel may ignore it.
+        // The memory remains mapped and accessible; the kernel is free to
+        // evict the pages from the page cache. Subsequent accesses will
+        // re-fault from disk. This is safe because we do not rely on the
+        // pages staying resident — we only use it after the segment has
+        // been fully consumed.
         unsafe {
-            self.mmap
+            self.mmap()
                 .unchecked_advise(memmap2::UncheckedAdvice::DontNeed)?;
         }
         Ok(())
@@ -140,8 +178,14 @@ impl MmapSegment {
 
     /// Truncate the file to the actual data size (on close).
     pub fn truncate_to_size(&self) -> io::Result<()> {
+        self.truncate_to_size_inner(self.size)
+    }
+
+    /// Inner truncation helper that takes an explicit size, used by Drop
+    /// after the mmap has already been unmapped.
+    fn truncate_to_size_inner(&self, data_size: usize) -> io::Result<()> {
         let file = OpenOptions::new().write(true).open(&self.path)?;
-        file.set_len(self.size as u64)?;
+        file.set_len(data_size as u64)?;
         Ok(())
     }
 
@@ -153,8 +197,16 @@ impl MmapSegment {
 
 impl Drop for MmapSegment {
     fn drop(&mut self) {
-        // Best-effort truncate on drop
-        let _ = self.truncate_to_size();
+        let size = self.size;
+        // Take ownership of the mmap and drop it first to unmap the file.
+        // This ensures the file is no longer memory-mapped before we truncate,
+        // avoiding undefined behavior (SIGBUS on Linux, access violations on
+        // Windows) from truncating a mapped region.
+        if let Some(mmap) = self.mmap.take() {
+            drop(mmap);
+        }
+        // Now safe to truncate — the file is unmapped.
+        let _ = self.truncate_to_size_inner(size);
     }
 }
 
@@ -217,5 +269,32 @@ mod tests {
         assert!(seg.read(0, 6).is_none()); // past valid size
         assert!(seg.read(3, 2).is_some()); // just at boundary (3+2=5=size)
         assert!(seg.read(3, 3).is_none()); // past boundary (3+3=6>5)
+    }
+
+    #[test]
+    fn test_drop_unmaps_before_truncate() {
+        // Verify that dropping an MmapSegment does not panic or cause UB
+        // by truncating while the file is still mapped.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("drop_order.seg");
+
+        let mut seg = MmapSegment::create(&path, 4096).unwrap();
+        seg.append(b"test data for drop ordering").unwrap();
+        let expected_size = seg.size();
+
+        // Explicit drop — should unmap first, then truncate
+        drop(seg);
+
+        // Verify the file was truncated correctly
+        let metadata = std::fs::metadata(&path).unwrap();
+        assert_eq!(metadata.len(), expected_size as u64);
+
+        // Verify we can reopen the file (not corrupted)
+        let reopened = MmapSegment::open_read(&path, expected_size).unwrap();
+        assert_eq!(reopened.size(), expected_size);
+        assert_eq!(
+            reopened.read(0, expected_size),
+            Some(b"test data for drop ordering".as_slice())
+        );
     }
 }
