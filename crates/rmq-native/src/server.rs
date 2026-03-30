@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::TcpListener;
+use tokio::sync::watch;
 use tracing::{debug, error, info};
 
 use rmq_auth::user_store::UserStore;
@@ -23,25 +24,38 @@ pub async fn run(
     bind_addr: SocketAddr,
     vhost: Arc<VHost>,
     user_store: Arc<UserStore>,
+    mut shutdown: watch::Receiver<bool>,
 ) -> std::io::Result<()> {
     let listener = TcpListener::bind(bind_addr).await?;
     info!("RMQ native protocol listening on {}", bind_addr);
 
     loop {
-        match listener.accept().await {
-            Ok((stream, _)) => {
-                let _ = stream.set_nodelay(true);
-                let vhost = vhost.clone();
-                let user_store = user_store.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, vhost, user_store).await {
-                        debug!("native client error: {e}");
+        tokio::select! {
+            result = listener.accept() => {
+                match result {
+                    Ok((stream, _)) => {
+                        let _ = stream.set_nodelay(true);
+                        let vhost = vhost.clone();
+                        let user_store = user_store.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = handle_client(stream, vhost, user_store).await {
+                                debug!("native client error: {e}");
+                            }
+                        });
                     }
-                });
+                    Err(e) => error!("native accept error: {e}"),
+                }
             }
-            Err(e) => error!("native accept error: {e}"),
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    info!("native protocol listener shutting down");
+                    break;
+                }
+            }
         }
     }
+
+    Ok(())
 }
 
 async fn handle_client(

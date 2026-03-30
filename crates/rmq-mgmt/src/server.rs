@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use tokio::net::TcpListener;
+use tokio::sync::watch;
 use tracing::info;
 
 use rmq_auth::user_store::UserStore;
@@ -28,6 +29,7 @@ pub async fn run(
     config: MgmtConfig,
     vhost: Arc<VHost>,
     user_store: Arc<UserStore>,
+    mut shutdown: watch::Receiver<bool>,
 ) -> std::io::Result<()> {
     let state = AppState { vhost, user_store };
     let app = api_router().with_state(state);
@@ -36,6 +38,10 @@ pub async fn run(
     info!("Management HTTP API listening on {}", config.bind_addr);
 
     axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            let _ = shutdown.wait_for(|v| *v).await;
+            info!("Management HTTP API shutting down");
+        })
         .await
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
 }

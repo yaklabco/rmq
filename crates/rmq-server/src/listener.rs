@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use tokio::net::TcpListener;
+use tokio::sync::watch;
 use tokio_rustls::TlsAcceptor;
 use tracing::{error, info};
 
@@ -28,24 +29,37 @@ pub async fn run(
     config: ListenerConfig,
     vhost: Arc<VHost>,
     user_store: Arc<UserStore>,
+    mut shutdown: watch::Receiver<bool>,
 ) -> std::io::Result<()> {
     let listener = TcpListener::bind(config.bind_addr).await?;
     info!("AMQP listening on {}", config.bind_addr);
 
     loop {
-        match listener.accept().await {
-            Ok((stream, _addr)) => {
-                let vhost = vhost.clone();
-                let user_store = user_store.clone();
-                tokio::spawn(async move {
-                    Connection::handle(stream, vhost, user_store).await;
-                });
+        tokio::select! {
+            result = listener.accept() => {
+                match result {
+                    Ok((stream, _addr)) => {
+                        let vhost = vhost.clone();
+                        let user_store = user_store.clone();
+                        tokio::spawn(async move {
+                            Connection::handle(stream, vhost, user_store).await;
+                        });
+                    }
+                    Err(e) => {
+                        error!("accept error: {e}");
+                    }
+                }
             }
-            Err(e) => {
-                error!("accept error: {e}");
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    info!("AMQP listener shutting down");
+                    break;
+                }
             }
         }
     }
+
+    Ok(())
 }
 
 /// Start the AMQPS (TLS) TCP listener.
@@ -54,32 +68,45 @@ pub async fn run_tls(
     vhost: Arc<VHost>,
     user_store: Arc<UserStore>,
     tls_acceptor: TlsAcceptor,
+    mut shutdown: watch::Receiver<bool>,
 ) -> std::io::Result<()> {
     let listener = TcpListener::bind(bind_addr).await?;
     info!("AMQPS (TLS) listening on {}", bind_addr);
 
     loop {
-        match listener.accept().await {
-            Ok((tcp_stream, _addr)) => {
-                let vhost = vhost.clone();
-                let user_store = user_store.clone();
-                let acceptor = tls_acceptor.clone();
-                tokio::spawn(async move {
-                    match acceptor.accept(tcp_stream).await {
-                        Ok(tls_stream) => {
-                            // Convert TLS stream to a type compatible with Connection::handle
-                            // We need to adapt — use tokio::io split
-                            Connection::handle_tls(tls_stream, vhost, user_store).await;
-                        }
-                        Err(e) => {
-                            error!("TLS handshake failed: {e}");
-                        }
+        tokio::select! {
+            result = listener.accept() => {
+                match result {
+                    Ok((tcp_stream, _addr)) => {
+                        let vhost = vhost.clone();
+                        let user_store = user_store.clone();
+                        let acceptor = tls_acceptor.clone();
+                        tokio::spawn(async move {
+                            match acceptor.accept(tcp_stream).await {
+                                Ok(tls_stream) => {
+                                    // Convert TLS stream to a type compatible with Connection::handle
+                                    // We need to adapt — use tokio::io split
+                                    Connection::handle_tls(tls_stream, vhost, user_store).await;
+                                }
+                                Err(e) => {
+                                    error!("TLS handshake failed: {e}");
+                                }
+                            }
+                        });
                     }
-                });
+                    Err(e) => {
+                        error!("TLS accept error: {e}");
+                    }
+                }
             }
-            Err(e) => {
-                error!("TLS accept error: {e}");
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    info!("AMQPS (TLS) listener shutting down");
+                    break;
+                }
             }
         }
     }
+
+    Ok(())
 }
