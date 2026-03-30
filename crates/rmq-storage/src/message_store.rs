@@ -278,10 +278,12 @@ impl MessageStore {
 
             // Remove the segment index
             self.segment_indices.remove(&seg_id);
+        }
 
-            // If read pointer was pointing at this segment, advance it
-            if self.read_segment_id == seg_id {
-                self.read_segment_id = seg_id + 1;
+        // Advance read pointer to the lowest remaining segment if needed
+        if let Some(&min_id) = self.segment_indices.keys().next() {
+            if self.read_segment_id < min_id {
+                self.read_segment_id = min_id;
                 self.read_position = 0;
             }
         }

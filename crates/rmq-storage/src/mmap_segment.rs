@@ -182,7 +182,10 @@ impl MmapSegment {
         self.remaining() >= needed
     }
 
-    /// Flush changes to disk (async msync) and update the header.
+    /// Flush changes to disk (async msync).
+    ///
+    /// **Note:** This does NOT update the crash recovery header. Use `flush()`
+    /// for crash-safe semantics where the header must reflect the valid offset.
     pub fn flush_async(&self) -> io::Result<()> {
         self.mmap().flush_async()
     }
