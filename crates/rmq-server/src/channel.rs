@@ -27,6 +27,7 @@ struct Unacked {
 }
 
 /// Consumer state.
+#[allow(dead_code)]
 struct Consumer {
     tag: String,
     queue_name: String,
@@ -81,6 +82,7 @@ pub struct ServerChannel {
     tx_acks: Vec<TxAck>,
 }
 
+#[allow(dead_code)]
 struct TxPublish {
     exchange: String,
     routing_key: String,

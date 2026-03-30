@@ -20,6 +20,7 @@ pub type FrameSender = mpsc::UnboundedSender<AMQPFrame>;
 pub type FrameReceiver = mpsc::UnboundedReceiver<AMQPFrame>;
 
 /// An AMQP connection from a client.
+#[allow(dead_code)]
 pub struct Connection {
     vhost: Arc<VHost>,
     channels: HashMap<u16, ServerChannel>,

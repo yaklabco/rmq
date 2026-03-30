@@ -10,6 +10,7 @@ use crate::queue::{DeadLetter, PublishResult, Queue, QueueConfig};
 /// A priority queue that routes messages to sub-queues based on priority.
 /// Priority 0 is lowest, max_priority is highest.
 /// Messages without a priority property default to 0.
+#[allow(dead_code)]
 pub struct PriorityQueue {
     name: String,
     max_priority: u8,

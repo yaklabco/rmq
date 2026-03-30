@@ -2,13 +2,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
 use parking_lot::Mutex;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use rmq_auth::user_store::UserStore;
-use rmq_broker::exchange::ExchangeConfig;
 use rmq_broker::queue::QueueConfig;
 use rmq_broker::vhost::VHost;
 use rmq_protocol::field_table::FieldTable;
@@ -171,7 +170,7 @@ impl MqttBroker {
     async fn handle_publish(
         &self,
         publish: PublishPacket,
-        session: &mut Option<Session>,
+        _session: &mut Option<Session>,
     ) -> Vec<MqttPacket> {
         let amqp_routing_key = mqtt_topic_to_amqp_routing_key(&publish.topic);
 
@@ -292,6 +291,7 @@ impl MqttBroker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
 
     fn setup() -> (Arc<MqttBroker>, tempfile::TempDir) {
         let dir = tempfile::TempDir::new().unwrap();

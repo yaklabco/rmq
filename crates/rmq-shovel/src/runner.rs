@@ -18,6 +18,7 @@ pub enum RunnerState {
     Error,
 }
 
+#[allow(dead_code)]
 struct RunningTask {
     cancel_tx: watch::Sender<bool>,
     handle: tokio::task::JoinHandle<u64>,

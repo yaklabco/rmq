@@ -82,7 +82,9 @@ pub struct Queue {
     overflow: OverflowPolicy,
     dead_letter_exchange: Option<String>,
     dead_letter_routing_key: Option<String>,
+    #[allow(dead_code)]
     expires: Option<u64>,
+    #[allow(dead_code)]
     delivery_limit: Option<u64>,
 }
 
