@@ -229,7 +229,11 @@ impl MqttBroker {
             let amqp_routing_key = mqtt_topic_to_amqp_routing_key(topic);
 
             // Create a queue for this subscription if needed
-            let queue_name = format!("mqtt.{}.{}", session.client_id, topic.replace('/', "."));
+            let queue_name = format!(
+                "mqtt:{client_id}:{topic}",
+                client_id = session.client_id,
+                topic = topic
+            );
             let _ = self.vhost.declare_queue(QueueConfig {
                 name: queue_name.clone(),
                 durable: false,
@@ -268,7 +272,11 @@ impl MqttBroker {
             for topic in &unsub.topics {
                 session.unsubscribe(topic);
                 // Remove the subscription queue
-                let queue_name = format!("mqtt.{}.{}", session.client_id, topic.replace('/', "."));
+                let queue_name = format!(
+                    "mqtt:{client_id}:{topic}",
+                    client_id = session.client_id,
+                    topic = topic
+                );
                 let _ = self.vhost.delete_queue(&queue_name);
             }
         }
@@ -281,7 +289,11 @@ impl MqttBroker {
     fn cleanup_session(&self, session: &Session) {
         // Remove all subscription queues
         for topic in session.subscriptions.keys() {
-            let queue_name = format!("mqtt.{}.{}", session.client_id, topic.replace('/', "."));
+            let queue_name = format!(
+                "mqtt:{client_id}:{topic}",
+                client_id = session.client_id,
+                topic = topic
+            );
             let _ = self.vhost.delete_queue(&queue_name);
         }
         self.sessions.lock().remove(&session.client_id);
