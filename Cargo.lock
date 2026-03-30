@@ -2285,7 +2285,6 @@ dependencies = [
  "bytes",
  "futures-lite 2.6.1",
  "lapin",
- "libc",
  "parking_lot",
  "rcgen",
  "rmq-auth",
