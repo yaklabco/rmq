@@ -13,11 +13,29 @@ use rmq_protocol::field_table::{FieldTable, FieldValue};
 use rmq_protocol::frame::*;
 use rmq_protocol::types::*;
 
-use crate::channel::ServerChannel;
+use crate::channel::{ChannelError, ServerChannel};
 
 /// Frames to be sent back to the client.
-pub type FrameSender = mpsc::UnboundedSender<AMQPFrame>;
-pub type FrameReceiver = mpsc::UnboundedReceiver<AMQPFrame>;
+pub type FrameSender = mpsc::Sender<AMQPFrame>;
+pub type FrameReceiver = mpsc::Receiver<AMQPFrame>;
+
+/// Bounded channel capacity for outbound frames.
+const FRAME_CHANNEL_CAPACITY: usize = 8192;
+
+/// Typed error for connection-level failures.
+#[derive(Debug, thiserror::Error)]
+pub enum ServerError {
+    #[error("invalid channel number")]
+    InvalidChannel,
+    #[error("channel {0} already open")]
+    ChannelAlreadyOpen(u16),
+    #[error("channel {0} not open")]
+    ChannelNotOpen(u16),
+    #[error("frame send failed")]
+    SendFailed,
+    #[error("channel error: {0}")]
+    Channel(#[from] ChannelError),
+}
 
 /// An AMQP connection from a client.
 #[allow(dead_code)]
@@ -37,27 +55,8 @@ impl Connection {
             .peer_addr()
             .map(|a| a.to_string())
             .unwrap_or_else(|_| "unknown".into());
-        // On Linux: use TCP_CORK for batch-optimized writes (coalesce frames)
-        // On macOS: use TCP_NODELAY for low-latency individual writes
-        #[cfg(target_os = "linux")]
-        {
-            use std::os::fd::AsRawFd;
-            let fd = stream.as_raw_fd();
-            unsafe {
-                let cork: libc::c_int = 1;
-                libc::setsockopt(
-                    fd,
-                    libc::IPPROTO_TCP,
-                    libc::TCP_CORK,
-                    &cork as *const _ as *const libc::c_void,
-                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-                );
-            }
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = stream.set_nodelay(true);
-        }
+        // TCP_NODELAY for low-latency writes; BufWriter handles batching.
+        let _ = stream.set_nodelay(true);
         Self::handle_stream(stream, vhost, user_store, peer_addr).await;
     }
 
@@ -110,7 +109,7 @@ impl Connection {
         let mut frame_buf = BytesMut::with_capacity(65536);
 
         // Create frame sender/receiver for write task
-        let (tx, mut rx) = mpsc::unbounded_channel::<AMQPFrame>();
+        let (tx, mut rx) = mpsc::channel::<AMQPFrame>(FRAME_CHANNEL_CAPACITY);
 
         // Spawn coalescing write task — drains all pending frames into one write
         let write_handle = tokio::spawn(async move {
@@ -169,12 +168,12 @@ impl Connection {
             })),
         };
 
-        if tx.send(start).is_err() {
+        if tx.try_send(start).is_err() {
             return;
         }
 
         // Read Connection.StartOk
-        let frame = match read_frame(&mut reader, &mut frame_buf).await {
+        let frame = match read_frame(&mut reader, &mut frame_buf, 0).await {
             Ok(Some(f)) => f,
             _ => {
                 error!("failed to read StartOk");
@@ -197,7 +196,7 @@ impl Connection {
                             },
                         )),
                     };
-                    let _ = tx.send(close);
+                    let _ = tx.try_send(close);
                     return;
                 }
                 ok
@@ -217,12 +216,12 @@ impl Connection {
                 heartbeat: DEFAULT_HEARTBEAT,
             })),
         };
-        if tx.send(tune).is_err() {
+        if tx.try_send(tune).is_err() {
             return;
         }
 
         // Read Connection.TuneOk
-        let frame = match read_frame(&mut reader, &mut frame_buf).await {
+        let frame = match read_frame(&mut reader, &mut frame_buf, 0).await {
             Ok(Some(f)) => f,
             _ => {
                 error!("failed to read TuneOk");
@@ -251,7 +250,7 @@ impl Connection {
         let heartbeat = tune_ok.heartbeat;
 
         // Read Connection.Open
-        let frame = match read_frame(&mut reader, &mut frame_buf).await {
+        let frame = match read_frame(&mut reader, &mut frame_buf, 0).await {
             Ok(Some(f)) => f,
             _ => {
                 error!("failed to read ConnectionOpen");
@@ -279,7 +278,7 @@ impl Connection {
             channel: 0,
             payload: FramePayload::Method(MethodFrame::ConnectionOpenOk),
         };
-        if tx.send(open_ok).is_err() {
+        if tx.try_send(open_ok).is_err() {
             return;
         }
 
@@ -314,8 +313,12 @@ impl Connection {
                         channel: 0,
                         payload: FramePayload::Heartbeat,
                     };
-                    if heartbeat_tx.send(hb).is_err() {
-                        break;
+                    match heartbeat_tx.try_send(hb) {
+                        Ok(_) => {}
+                        Err(mpsc::error::TrySendError::Full(_)) => {
+                            warn!("heartbeat dropped: slow client");
+                        }
+                        Err(mpsc::error::TrySendError::Closed(_)) => break,
                     }
                 }
             }))
@@ -328,7 +331,12 @@ impl Connection {
 
         loop {
             let frame_result = if let Some(timeout) = read_timeout {
-                match tokio::time::timeout(timeout, read_frame(&mut reader, &mut frame_buf)).await {
+                match tokio::time::timeout(
+                    timeout,
+                    read_frame(&mut reader, &mut frame_buf, frame_max),
+                )
+                .await
+                {
                     Ok(result) => result,
                     Err(_) => {
                         info!("heartbeat timeout from {peer_addr}");
@@ -336,7 +344,7 @@ impl Connection {
                     }
                 }
             } else {
-                read_frame(&mut reader, &mut frame_buf).await
+                read_frame(&mut reader, &mut frame_buf, frame_max).await
             };
 
             let frame = match frame_result {
@@ -365,7 +373,7 @@ impl Connection {
                         channel: 0,
                         payload: FramePayload::Method(MethodFrame::ConnectionCloseOk),
                     };
-                    let _ = tx.send(close_ok);
+                    let _ = tx.try_send(close_ok);
                     break;
                 }
                 _ => {}
@@ -386,16 +394,16 @@ impl Connection {
         info!("connection from {peer_addr} closed");
     }
 
-    fn process_frame(&mut self, frame: AMQPFrame) -> Result<(), Box<dyn std::error::Error>> {
+    fn process_frame(&mut self, frame: AMQPFrame) -> Result<(), ServerError> {
         let channel_id = frame.channel;
 
         match frame.payload {
             FramePayload::Method(MethodFrame::ChannelOpen) => {
                 if channel_id == 0 || channel_id > self.channel_max {
-                    return Err("invalid channel number".into());
+                    return Err(ServerError::InvalidChannel);
                 }
                 if self.channels.contains_key(&channel_id) {
-                    return Err("channel already open".into());
+                    return Err(ServerError::ChannelAlreadyOpen(channel_id));
                 }
                 let channel = ServerChannel::new(channel_id, self.vhost.clone(), self.tx.clone());
                 self.channels.insert(channel_id, channel);
@@ -404,7 +412,9 @@ impl Connection {
                     channel: channel_id,
                     payload: FramePayload::Method(MethodFrame::ChannelOpenOk),
                 };
-                self.tx.send(open_ok)?;
+                self.tx
+                    .try_send(open_ok)
+                    .map_err(|_| ServerError::SendFailed)?;
                 Ok(())
             }
             FramePayload::Method(MethodFrame::ChannelClose(close)) => {
@@ -417,7 +427,9 @@ impl Connection {
                     channel: channel_id,
                     payload: FramePayload::Method(MethodFrame::ChannelCloseOk),
                 };
-                self.tx.send(close_ok)?;
+                self.tx
+                    .try_send(close_ok)
+                    .map_err(|_| ServerError::SendFailed)?;
                 Ok(())
             }
             FramePayload::Method(MethodFrame::ChannelCloseOk) => {
@@ -426,10 +438,11 @@ impl Connection {
             }
             _ => {
                 if let Some(channel) = self.channels.get_mut(&channel_id) {
-                    channel.process_frame(frame)
+                    channel.process_frame(frame)?;
+                    Ok(())
                 } else {
                     warn!("frame for unknown channel {channel_id}");
-                    Err(format!("channel {channel_id} not open").into())
+                    Err(ServerError::ChannelNotOpen(channel_id))
                 }
             }
         }
@@ -475,9 +488,13 @@ fn extract_credentials(mechanism: &str, response: &[u8]) -> Option<(String, Stri
 }
 
 /// Read a single AMQP frame from the reader using a reusable buffer.
+///
+/// If `frame_max` is non-zero, frames larger than this limit are rejected
+/// with a protocol error to prevent memory exhaustion from oversized frames.
 async fn read_frame<R: AsyncRead + Unpin>(
     reader: &mut BufReader<R>,
     frame_buf: &mut BytesMut,
+    frame_max: u32,
 ) -> Result<Option<AMQPFrame>, Box<dyn std::error::Error + Send + Sync>> {
     // Read frame header: type(1) + channel(2) + size(4) = 7 bytes
     let mut header = [0u8; 7];
@@ -488,6 +505,11 @@ async fn read_frame<R: AsyncRead + Unpin>(
     }
 
     let size = u32::from_be_bytes([header[3], header[4], header[5], header[6]]);
+
+    // Validate frame size against negotiated maximum to prevent OOM
+    if frame_max > 0 && size > frame_max {
+        return Err(format!("frame size {size} exceeds negotiated frame_max {frame_max}").into());
+    }
 
     // Reuse the provided buffer to avoid per-frame allocation
     let total = 7 + size as usize + 1;
@@ -502,4 +524,84 @@ async fn read_frame<R: AsyncRead + Unpin>(
     let mut bytes = frame_buf.split().freeze();
     let frame = AMQPFrame::decode(&mut bytes)?;
     Ok(Some(frame))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::BufReader;
+
+    /// Build a raw frame byte sequence: type(1) + channel(2) + size(4) + payload + end(1).
+    fn build_raw_frame(frame_type: u8, channel: u16, payload: &[u8]) -> Vec<u8> {
+        let size = payload.len() as u32;
+        let mut buf = Vec::with_capacity(7 + payload.len() + 1);
+        buf.push(frame_type);
+        buf.extend_from_slice(&channel.to_be_bytes());
+        buf.extend_from_slice(&size.to_be_bytes());
+        buf.extend_from_slice(payload);
+        buf.push(0xCE); // frame end
+        buf
+    }
+
+    #[tokio::test]
+    async fn test_frame_size_validation_rejects_oversized_frame() {
+        // Build a frame header that claims a huge payload size (1 MiB)
+        let huge_size: u32 = 1_048_576;
+        let frame_max: u32 = 131_072; // 128 KiB
+
+        // We only need the 7-byte header since validation happens before reading the body
+        let mut header_bytes = Vec::new();
+        header_bytes.push(1u8); // METHOD frame type
+        header_bytes.extend_from_slice(&0u16.to_be_bytes()); // channel 0
+        header_bytes.extend_from_slice(&huge_size.to_be_bytes());
+        // Add enough dummy bytes so read_exact for the body won't block
+        header_bytes.resize(7 + huge_size as usize + 1, 0);
+
+        let cursor = std::io::Cursor::new(header_bytes);
+        let mut reader = BufReader::new(cursor);
+        let mut frame_buf = BytesMut::with_capacity(1024);
+
+        let result = read_frame(&mut reader, &mut frame_buf, frame_max).await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("exceeds negotiated frame_max"),
+            "unexpected error: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_frame_size_validation_allows_valid_frame() {
+        // Build a valid heartbeat frame (type=8, channel=0, size=0, end=0xCE)
+        let raw = build_raw_frame(8, 0, &[]);
+
+        let cursor = std::io::Cursor::new(raw);
+        let mut reader = BufReader::new(cursor);
+        let mut frame_buf = BytesMut::with_capacity(1024);
+
+        let result = read_frame(&mut reader, &mut frame_buf, 131_072).await;
+        assert!(result.is_ok());
+        let frame = result.unwrap();
+        assert!(frame.is_some());
+        assert!(matches!(frame.unwrap().payload, FramePayload::Heartbeat));
+    }
+
+    #[tokio::test]
+    async fn test_frame_size_validation_disabled_with_zero_frame_max() {
+        // frame_max=0 means unlimited — should not reject any frame
+        let raw = build_raw_frame(8, 0, &[]);
+
+        let cursor = std::io::Cursor::new(raw);
+        let mut reader = BufReader::new(cursor);
+        let mut frame_buf = BytesMut::with_capacity(1024);
+
+        let result = read_frame(&mut reader, &mut frame_buf, 0).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_bounded_channel_capacity() {
+        let (tx, _rx) = mpsc::channel::<AMQPFrame>(FRAME_CHANNEL_CAPACITY);
+        assert_eq!(tx.capacity(), FRAME_CHANNEL_CAPACITY);
+    }
 }

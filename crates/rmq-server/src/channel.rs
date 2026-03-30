@@ -1,6 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
@@ -18,9 +18,28 @@ use rmq_storage::segment_position::SegmentPosition;
 
 use crate::connection::FrameSender;
 
+/// Maximum allowed message body size (128 MiB).
+pub const MAX_MESSAGE_SIZE: u64 = 128 * 1024 * 1024;
+
+/// Typed error for channel-level failures.
+#[derive(Debug, thiserror::Error)]
+pub enum ChannelError {
+    #[error("frame send failed")]
+    SendFailed,
+    #[error("vhost error: {0}")]
+    VHost(#[from] rmq_broker::vhost::VHostError),
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("storage error: {0}")]
+    Storage(String),
+    #[error("protocol error: {0}")]
+    Protocol(String),
+}
+
 /// Unacked message tracking.
 #[derive(Clone)]
 struct Unacked {
+    #[allow(dead_code)]
     delivery_tag: u64,
     queue_name: String,
     segment_position: SegmentPosition,
@@ -42,8 +61,16 @@ struct SharedChannelState {
     unacked_count: AtomicU64,
     /// Notified when a message is acked (so delivery tasks can resume).
     ack_notify: Notify,
-    /// Shared unacked message list — delivery tasks add, ack handler removes.
-    unacked: parking_lot::Mutex<Vec<Unacked>>,
+    /// Shared unacked message map — keyed by delivery_tag for O(log n) lookups.
+    unacked: parking_lot::Mutex<BTreeMap<u64, Unacked>>,
+    /// Per-consumer prefetch count, visible to delivery tasks.
+    prefetch_count: AtomicU16,
+    /// Global prefetch count, visible to delivery tasks.
+    global_prefetch_count: AtomicU16,
+    /// Flow control state — when false, delivery tasks must pause.
+    flow_active: std::sync::atomic::AtomicBool,
+    /// Notified when flow state changes.
+    flow_notify: Notify,
 }
 
 /// Server-side AMQP channel.
@@ -123,7 +150,11 @@ impl ServerChannel {
             shared: Arc::new(SharedChannelState {
                 unacked_count: AtomicU64::new(0),
                 ack_notify: Notify::new(),
-                unacked: parking_lot::Mutex::new(Vec::new()),
+                unacked: parking_lot::Mutex::new(BTreeMap::new()),
+                prefetch_count: AtomicU16::new(0),
+                global_prefetch_count: AtomicU16::new(0),
+                flow_active: std::sync::atomic::AtomicBool::new(true),
+                flow_notify: Notify::new(),
             }),
             tx_mode: false,
             tx_publishes: Vec::new(),
@@ -131,7 +162,7 @@ impl ServerChannel {
         }
     }
 
-    pub fn process_frame(&mut self, frame: AMQPFrame) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn process_frame(&mut self, frame: AMQPFrame) -> Result<(), ChannelError> {
         match frame.payload {
             FramePayload::Method(method) => self.handle_method(method),
             FramePayload::Header(header) => self.handle_header(header),
@@ -140,7 +171,7 @@ impl ServerChannel {
         }
     }
 
-    fn handle_method(&mut self, method: MethodFrame) -> Result<(), Box<dyn std::error::Error>> {
+    fn handle_method(&mut self, method: MethodFrame) -> Result<(), ChannelError> {
         match method {
             MethodFrame::ExchangeDeclare(declare) => {
                 if declare.passive {
@@ -338,7 +369,9 @@ impl ServerChannel {
 
             MethodFrame::QueuePurge(purge) => {
                 if let Some(queue) = self.vhost.get_queue(&purge.queue) {
-                    let count = queue.purge().map_err(|e| e.to_string())?;
+                    let count = queue
+                        .purge()
+                        .map_err(|e| ChannelError::Storage(e.to_string()))?;
                     if !purge.no_wait {
                         self.send(MethodFrame::QueuePurgeOk(count))?;
                     }
@@ -400,8 +433,6 @@ impl ServerChannel {
                 let tag = consumer_tag.clone();
                 let tag_for_task = tag.clone();
                 let next_tag = self.next_delivery_tag.clone();
-                let prefetch = self.prefetch_count;
-                let global_prefetch = self.global_prefetch_count;
                 let shared = self.shared.clone();
                 let queue_name_for_task = queue_name.clone();
                 let vhost_for_task = self.vhost.clone();
@@ -411,9 +442,17 @@ impl ServerChannel {
                     let queue_name = queue_name_for_task;
                     let mut consumer_unacked: u64 = 0;
                     loop {
-                        // Wait for prefetch capacity
+                        // Check channel flow — pause if flow is off
+                        while !shared.flow_active.load(Ordering::Relaxed) {
+                            shared.flow_notify.notified().await;
+                        }
+
+                        // Wait for prefetch capacity (read from shared atomics)
                         if !no_ack {
                             loop {
+                                let prefetch = shared.prefetch_count.load(Ordering::Relaxed);
+                                let global_prefetch =
+                                    shared.global_prefetch_count.load(Ordering::Relaxed);
                                 let global_unacked = shared.unacked_count.load(Ordering::Relaxed);
                                 let has_capacity = (prefetch == 0
                                     || consumer_unacked < prefetch as u64)
@@ -423,11 +462,11 @@ impl ServerChannel {
                                     break;
                                 }
                                 shared.ack_notify.notified().await;
-                                // Recount consumer unacked from shared list
+                                // Recount consumer unacked from shared map
                                 consumer_unacked = shared
                                     .unacked
                                     .lock()
-                                    .iter()
+                                    .values()
                                     .filter(|u| u.queue_name == queue_name)
                                     .count()
                                     as u64;
@@ -435,6 +474,7 @@ impl ServerChannel {
                         }
 
                         // Determine batch size based on available capacity
+                        let prefetch = shared.prefetch_count.load(Ordering::Relaxed);
                         let batch_size = if prefetch > 0 {
                             ((prefetch as u64).saturating_sub(consumer_unacked)) as usize
                         } else {
@@ -503,9 +543,9 @@ impl ServerChannel {
                                         payload: FramePayload::Body(msg.body.clone()),
                                     };
 
-                                    if tx.send(deliver).is_err()
-                                        || tx.send(header).is_err()
-                                        || tx.send(body).is_err()
+                                    if tx.send(deliver).await.is_err()
+                                        || tx.send(header).await.is_err()
+                                        || tx.send(body).await.is_err()
                                     {
                                         return;
                                     }
@@ -513,11 +553,14 @@ impl ServerChannel {
                                     if no_ack {
                                         no_ack_positions.push(sp);
                                     } else {
-                                        shared.unacked.lock().push(Unacked {
+                                        shared.unacked.lock().insert(
                                             delivery_tag,
-                                            queue_name: queue_name.clone(),
-                                            segment_position: sp,
-                                        });
+                                            Unacked {
+                                                delivery_tag,
+                                                queue_name: queue_name.clone(),
+                                                segment_position: sp,
+                                            },
+                                        );
                                         consumer_unacked += 1;
                                         shared.unacked_count.fetch_add(1, Ordering::Relaxed);
                                     }
@@ -576,19 +619,19 @@ impl ServerChannel {
                 }
                 let mut unacked = self.shared.unacked.lock();
                 if ack.multiple {
-                    let to_ack: Vec<_> = unacked
-                        .iter()
-                        .filter(|u| u.delivery_tag <= ack.delivery_tag)
-                        .map(|u| (u.queue_name.clone(), u.segment_position))
-                        .collect();
+                    // Split the map: keys <= delivery_tag go into to_ack
+                    let remaining = unacked.split_off(&(ack.delivery_tag + 1));
+                    let to_ack: BTreeMap<u64, Unacked> =
+                        std::mem::replace(&mut *unacked, remaining);
 
                     let acked_count = to_ack.len() as u64;
-                    for (queue_name, sp) in &to_ack {
-                        if let Some(queue) = self.vhost.get_queue(queue_name) {
-                            queue.ack(sp).map_err(|e| e.to_string())?;
+                    for entry in to_ack.values() {
+                        if let Some(queue) = self.vhost.get_queue(&entry.queue_name) {
+                            queue
+                                .ack(&entry.segment_position)
+                                .map_err(|e| ChannelError::Storage(e.to_string()))?;
                         }
                     }
-                    unacked.retain(|u| u.delivery_tag > ack.delivery_tag);
                     drop(unacked);
                     if acked_count > 0 {
                         self.shared
@@ -596,16 +639,12 @@ impl ServerChannel {
                             .fetch_sub(acked_count, Ordering::Relaxed);
                         self.shared.ack_notify.notify_waiters();
                     }
-                } else if let Some(pos) = unacked
-                    .iter()
-                    .position(|u| u.delivery_tag == ack.delivery_tag)
-                {
-                    let entry = unacked.remove(pos);
+                } else if let Some(entry) = unacked.remove(&ack.delivery_tag) {
                     drop(unacked);
                     if let Some(queue) = self.vhost.get_queue(&entry.queue_name) {
                         queue
                             .ack(&entry.segment_position)
-                            .map_err(|e| e.to_string())?;
+                            .map_err(|e| ChannelError::Storage(e.to_string()))?;
                     }
                     self.shared.unacked_count.fetch_sub(1, Ordering::Relaxed);
                     self.shared.ack_notify.notify_waiters();
@@ -615,11 +654,7 @@ impl ServerChannel {
 
             MethodFrame::BasicReject(reject) => {
                 let mut unacked = self.shared.unacked.lock();
-                if let Some(pos) = unacked
-                    .iter()
-                    .position(|u| u.delivery_tag == reject.delivery_tag)
-                {
-                    let entry = unacked.remove(pos);
+                if let Some(entry) = unacked.remove(&reject.delivery_tag) {
                     drop(unacked);
                     if let Some(queue) = self.vhost.get_queue(&entry.queue_name) {
                         if reject.requeue {
@@ -627,7 +662,7 @@ impl ServerChannel {
                         } else {
                             queue
                                 .ack(&entry.segment_position)
-                                .map_err(|e| e.to_string())?;
+                                .map_err(|e| ChannelError::Storage(e.to_string()))?;
                         }
                     }
                     self.shared.unacked_count.fetch_sub(1, Ordering::Relaxed);
@@ -639,19 +674,14 @@ impl ServerChannel {
             MethodFrame::BasicNack(nack) => {
                 let mut unacked = self.shared.unacked.lock();
                 let to_process: Vec<(String, SegmentPosition)> = if nack.multiple {
-                    let items: Vec<_> = unacked
-                        .iter()
-                        .filter(|u| u.delivery_tag <= nack.delivery_tag)
-                        .map(|u| (u.queue_name.clone(), u.segment_position))
-                        .collect();
-                    unacked.retain(|u| u.delivery_tag > nack.delivery_tag);
-                    items
-                } else if let Some(pos) = unacked
-                    .iter()
-                    .position(|u| u.delivery_tag == nack.delivery_tag)
-                {
-                    let u = unacked.remove(pos);
-                    vec![(u.queue_name.clone(), u.segment_position)]
+                    let remaining = unacked.split_off(&(nack.delivery_tag + 1));
+                    let removed = std::mem::replace(&mut *unacked, remaining);
+                    removed
+                        .into_values()
+                        .map(|u| (u.queue_name, u.segment_position))
+                        .collect()
+                } else if let Some(u) = unacked.remove(&nack.delivery_tag) {
+                    vec![(u.queue_name, u.segment_position)]
                 } else {
                     vec![]
                 };
@@ -663,7 +693,9 @@ impl ServerChannel {
                         if nack.requeue {
                             queue.requeue(sp);
                         } else {
-                            queue.ack(&sp).map_err(|e| e.to_string())?;
+                            queue
+                                .ack(&sp)
+                                .map_err(|e| ChannelError::Storage(e.to_string()))?;
                         }
                     }
                 }
@@ -705,11 +737,14 @@ impl ServerChannel {
                         let body_len = msg.body.len() as u64;
 
                         if !get.no_ack {
-                            self.shared.unacked.lock().push(Unacked {
+                            self.shared.unacked.lock().insert(
                                 delivery_tag,
-                                queue_name: get.queue.clone(),
-                                segment_position: sp,
-                            });
+                                Unacked {
+                                    delivery_tag,
+                                    queue_name: get.queue.clone(),
+                                    segment_position: sp,
+                                },
+                            );
                             self.shared.unacked_count.fetch_add(1, Ordering::Relaxed);
                         }
 
@@ -723,7 +758,9 @@ impl ServerChannel {
                                 message_count: queue.message_count() as u32,
                             })),
                         };
-                        self.tx.send(get_ok)?;
+                        self.tx
+                            .try_send(get_ok)
+                            .map_err(|_| ChannelError::SendFailed)?;
 
                         let header = AMQPFrame {
                             channel: self.id,
@@ -733,16 +770,22 @@ impl ServerChannel {
                                 properties: msg.properties.clone(),
                             }),
                         };
-                        self.tx.send(header)?;
+                        self.tx
+                            .try_send(header)
+                            .map_err(|_| ChannelError::SendFailed)?;
 
                         let body = AMQPFrame {
                             channel: self.id,
                             payload: FramePayload::Body(msg.body.clone()),
                         };
-                        self.tx.send(body)?;
+                        self.tx
+                            .try_send(body)
+                            .map_err(|_| ChannelError::SendFailed)?;
 
                         if get.no_ack {
-                            queue.ack(&sp).map_err(|e| e.to_string())?;
+                            queue
+                                .ack(&sp)
+                                .map_err(|e| ChannelError::Storage(e.to_string()))?;
                         }
                     }
                     Ok((None, dead_letters)) => {
@@ -761,13 +804,21 @@ impl ServerChannel {
             MethodFrame::BasicQos(qos) => {
                 if qos.global {
                     self.global_prefetch_count = qos.prefetch_count;
+                    self.shared
+                        .global_prefetch_count
+                        .store(qos.prefetch_count, Ordering::Relaxed);
                 } else {
                     self.prefetch_count = qos.prefetch_count;
+                    self.shared
+                        .prefetch_count
+                        .store(qos.prefetch_count, Ordering::Relaxed);
                 }
                 debug!(
                     "basic.qos: prefetch_count={}, global={} -> channel prefetch={}, global={}",
                     qos.prefetch_count, qos.global, self.prefetch_count, self.global_prefetch_count
                 );
+                // Notify delivery tasks in case prefetch was increased
+                self.shared.ack_notify.notify_waiters();
                 self.send(MethodFrame::BasicQosOk)?;
                 Ok(())
             }
@@ -823,18 +874,11 @@ impl ServerChannel {
                 for tx_ack in acks {
                     let mut unacked = self.shared.unacked.lock();
                     let to_process: Vec<Unacked> = if tx_ack.multiple {
-                        let items: Vec<_> = unacked
-                            .iter()
-                            .filter(|u| u.delivery_tag <= tx_ack.delivery_tag)
-                            .cloned()
-                            .collect();
-                        unacked.retain(|u| u.delivery_tag > tx_ack.delivery_tag);
-                        items
-                    } else if let Some(pos) = unacked
-                        .iter()
-                        .position(|u| u.delivery_tag == tx_ack.delivery_tag)
-                    {
-                        vec![unacked.remove(pos)]
+                        let remaining = unacked.split_off(&(tx_ack.delivery_tag + 1));
+                        let removed = std::mem::replace(&mut *unacked, remaining);
+                        removed.into_values().collect()
+                    } else if let Some(entry) = unacked.remove(&tx_ack.delivery_tag) {
+                        vec![entry]
                     } else {
                         vec![]
                     };
@@ -890,7 +934,37 @@ impl ServerChannel {
             }
 
             MethodFrame::ChannelFlow(active) => {
+                self.shared.flow_active.store(active, Ordering::Relaxed);
+                if active {
+                    // Wake delivery tasks that may be paused
+                    self.shared.flow_notify.notify_waiters();
+                }
+                debug!("channel.flow active={active} on channel {}", self.id);
                 self.send(MethodFrame::ChannelFlowOk(active))?;
+                Ok(())
+            }
+
+            MethodFrame::BasicRecover(requeue) | MethodFrame::BasicRecoverAsync(requeue) => {
+                if requeue {
+                    let mut unacked = self.shared.unacked.lock();
+                    let entries: Vec<Unacked> =
+                        std::mem::take(&mut *unacked).into_values().collect();
+                    let count = entries.len() as u64;
+                    drop(unacked);
+
+                    for entry in entries {
+                        if let Some(queue) = self.vhost.get_queue(&entry.queue_name) {
+                            queue.requeue(entry.segment_position);
+                        }
+                    }
+                    if count > 0 {
+                        self.shared
+                            .unacked_count
+                            .fetch_sub(count, Ordering::Relaxed);
+                        self.shared.ack_notify.notify_waiters();
+                    }
+                }
+                self.send(MethodFrame::BasicRecoverOk)?;
                 Ok(())
             }
 
@@ -901,8 +975,23 @@ impl ServerChannel {
         }
     }
 
-    fn handle_header(&mut self, header: ContentHeader) -> Result<(), Box<dyn std::error::Error>> {
+    fn handle_header(&mut self, header: ContentHeader) -> Result<(), ChannelError> {
         if let Some(ref mut state) = self.publish_state {
+            // Validate message size to prevent memory exhaustion
+            if header.body_size > MAX_MESSAGE_SIZE {
+                self.publish_state = None;
+                self.close_channel(
+                    ReplyCode::PreconditionFailed as u16,
+                    &format!(
+                        "message size {} exceeds maximum {}",
+                        header.body_size, MAX_MESSAGE_SIZE
+                    ),
+                    CLASS_BASIC,
+                    METHOD_BASIC_PUBLISH,
+                )?;
+                return Ok(());
+            }
+
             state.properties = Some(header.properties);
             state.body_size = header.body_size;
             state.body = Vec::with_capacity(header.body_size as usize);
@@ -915,7 +1004,7 @@ impl ServerChannel {
         Ok(())
     }
 
-    fn handle_body(&mut self, body: Bytes) -> Result<(), Box<dyn std::error::Error>> {
+    fn handle_body(&mut self, body: Bytes) -> Result<(), ChannelError> {
         let should_finish = if let Some(ref mut state) = self.publish_state {
             state.body.extend_from_slice(&body);
             state.body.len() as u64 >= state.body_size
@@ -929,8 +1018,11 @@ impl ServerChannel {
         Ok(())
     }
 
-    fn finish_publish(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let state = self.publish_state.take().ok_or("no publish in progress")?;
+    fn finish_publish(&mut self) -> Result<(), ChannelError> {
+        let state = self
+            .publish_state
+            .take()
+            .ok_or_else(|| ChannelError::Protocol("no publish in progress".into()))?;
 
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -995,12 +1087,14 @@ impl ServerChannel {
         Ok(())
     }
 
-    fn send(&self, method: MethodFrame) -> Result<(), Box<dyn std::error::Error>> {
+    fn send(&self, method: MethodFrame) -> Result<(), ChannelError> {
         let frame = AMQPFrame {
             channel: self.id,
             payload: FramePayload::Method(method),
         };
-        self.tx.send(frame)?;
+        self.tx
+            .try_send(frame)
+            .map_err(|_| ChannelError::SendFailed)?;
         Ok(())
     }
 
@@ -1010,7 +1104,7 @@ impl ServerChannel {
         reply_text: &str,
         class_id: u16,
         method_id: u16,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), ChannelError> {
         self.send(MethodFrame::ChannelClose(ChannelClose {
             reply_code,
             reply_text: reply_text.to_string(),
@@ -1024,7 +1118,10 @@ impl Drop for ServerChannel {
     fn drop(&mut self) {
         // Requeue all unacked messages so they become available to other consumers.
         // This is critical for at-least-once delivery guarantee.
-        let unacked: Vec<Unacked> = self.shared.unacked.lock().drain(..).collect();
+        let unacked: Vec<Unacked> = {
+            let mut map = self.shared.unacked.lock();
+            std::mem::take(&mut *map).into_values().collect()
+        };
         for entry in unacked {
             if let Some(queue) = self.vhost.get_queue(&entry.queue_name) {
                 queue.requeue(entry.segment_position);
@@ -1047,4 +1144,122 @@ fn rand_u64() -> u64 {
     use std::collections::hash_map::RandomState;
     use std::hash::{BuildHasher, Hasher};
     RandomState::new().build_hasher().finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rmq_protocol::properties::BasicProperties;
+
+    /// Create a ServerChannel with a dummy vhost for testing.
+    fn make_test_channel() -> (ServerChannel, tokio::sync::mpsc::Receiver<AMQPFrame>) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let vhost = Arc::new(VHost::new("/".into(), dir.path()).unwrap());
+        let (tx, rx) = tokio::sync::mpsc::channel(128);
+        let ch = ServerChannel::new(1, vhost, tx);
+        (ch, rx)
+    }
+
+    #[test]
+    fn test_message_size_cap_rejects_oversized_message() {
+        let (mut ch, mut rx) = make_test_channel();
+
+        // Start a publish
+        let publish = AMQPFrame {
+            channel: 1,
+            payload: FramePayload::Method(MethodFrame::BasicPublish(BasicPublish {
+                exchange: String::new(),
+                routing_key: "test".into(),
+                mandatory: false,
+                immediate: false,
+            })),
+        };
+        ch.process_frame(publish).unwrap();
+
+        // Send a content header claiming a body larger than MAX_MESSAGE_SIZE
+        let oversized_header = AMQPFrame {
+            channel: 1,
+            payload: FramePayload::Header(ContentHeader {
+                class_id: CLASS_BASIC,
+                body_size: MAX_MESSAGE_SIZE + 1,
+                properties: BasicProperties::default(),
+            }),
+        };
+        ch.process_frame(oversized_header).unwrap();
+
+        // The channel should have sent a ChannelClose frame
+        let frame = rx.try_recv().unwrap();
+        match frame.payload {
+            FramePayload::Method(MethodFrame::ChannelClose(close)) => {
+                assert_eq!(close.reply_code, ReplyCode::PreconditionFailed as u16);
+                assert!(
+                    close.reply_text.contains("exceeds maximum"),
+                    "unexpected close text: {}",
+                    close.reply_text
+                );
+            }
+            other => panic!("expected ChannelClose, got {:?}", other),
+        }
+
+        // Publish state should be cleared
+        assert!(ch.publish_state.is_none());
+    }
+
+    #[test]
+    fn test_message_size_cap_allows_valid_message() {
+        let (mut ch, _rx) = make_test_channel();
+
+        // Start a publish
+        let publish = AMQPFrame {
+            channel: 1,
+            payload: FramePayload::Method(MethodFrame::BasicPublish(BasicPublish {
+                exchange: String::new(),
+                routing_key: "test".into(),
+                mandatory: false,
+                immediate: false,
+            })),
+        };
+        ch.process_frame(publish).unwrap();
+
+        // Send a content header with a small body size
+        let small_header = AMQPFrame {
+            channel: 1,
+            payload: FramePayload::Header(ContentHeader {
+                class_id: CLASS_BASIC,
+                body_size: 1024,
+                properties: BasicProperties::default(),
+            }),
+        };
+        // Should not error — publish state should still be active (waiting for body)
+        ch.process_frame(small_header).unwrap();
+        assert!(ch.publish_state.is_some());
+    }
+
+    #[test]
+    fn test_message_size_cap_allows_exactly_max() {
+        let (mut ch, _rx) = make_test_channel();
+
+        let publish = AMQPFrame {
+            channel: 1,
+            payload: FramePayload::Method(MethodFrame::BasicPublish(BasicPublish {
+                exchange: String::new(),
+                routing_key: "test".into(),
+                mandatory: false,
+                immediate: false,
+            })),
+        };
+        ch.process_frame(publish).unwrap();
+
+        // Exactly MAX_MESSAGE_SIZE should be allowed
+        let header = AMQPFrame {
+            channel: 1,
+            payload: FramePayload::Header(ContentHeader {
+                class_id: CLASS_BASIC,
+                body_size: MAX_MESSAGE_SIZE,
+                properties: BasicProperties::default(),
+            }),
+        };
+        ch.process_frame(header).unwrap();
+        assert!(ch.publish_state.is_some());
+    }
 }
