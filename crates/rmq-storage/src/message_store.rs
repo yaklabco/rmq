@@ -114,7 +114,7 @@ impl MessageStore {
     /// Does NOT fsync — call `flush_async()` or `sync()` separately.
     pub fn push(&mut self, msg: &StoredMessage) -> io::Result<SegmentPosition> {
         self.encode_buf.clear();
-        encode_message_to(msg, &mut self.encode_buf);
+        encode_message_to(msg, &mut self.encode_buf)?;
         let bytesize = self.encode_buf.len() as u32;
 
         if let Some(ref seg) = self.write_segment
@@ -507,13 +507,18 @@ impl MessageStore {
 
 // --- Message encoding/decoding ---
 
-fn encode_message_to(msg: &StoredMessage, buf: &mut BytesMut) {
+fn encode_message_to(msg: &StoredMessage, buf: &mut BytesMut) -> io::Result<()> {
     buf.put_i64(msg.timestamp);
-    encode_short_string(buf, &msg.exchange);
-    encode_short_string(buf, &msg.routing_key);
-    msg.properties.encode(buf);
+    encode_short_string(buf, &msg.exchange)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
+    encode_short_string(buf, &msg.routing_key)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
+    msg.properties
+        .encode(buf)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
     buf.put_u64(msg.body.len() as u64);
     buf.put_slice(&msg.body);
+    Ok(())
 }
 
 fn decode_message(data: &[u8]) -> io::Result<StoredMessage> {

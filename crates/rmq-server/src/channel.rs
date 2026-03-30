@@ -137,6 +137,7 @@ impl ServerChannel {
             FramePayload::Header(header) => self.handle_header(header),
             FramePayload::Body(body) => self.handle_body(body),
             FramePayload::Heartbeat => Ok(()), // shouldn't arrive on a channel
+            _ => Ok(()),                       // unknown frame types are ignored
         }
     }
 

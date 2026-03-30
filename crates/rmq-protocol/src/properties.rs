@@ -91,18 +91,18 @@ impl BasicProperties {
         flags
     }
 
-    pub fn encode(&self, buf: &mut BytesMut) {
+    pub fn encode(&self, buf: &mut BytesMut) -> Result<(), ProtocolError> {
         let flags = self.flags();
         buf.put_u16(flags);
 
         if let Some(ref s) = self.content_type {
-            encode_short_string(buf, s);
+            encode_short_string(buf, s)?;
         }
         if let Some(ref s) = self.content_encoding {
-            encode_short_string(buf, s);
+            encode_short_string(buf, s)?;
         }
         if let Some(ref t) = self.headers {
-            t.encode(buf);
+            t.encode(buf)?;
         }
         if let Some(v) = self.delivery_mode {
             buf.put_u8(v);
@@ -111,32 +111,33 @@ impl BasicProperties {
             buf.put_u8(v);
         }
         if let Some(ref s) = self.correlation_id {
-            encode_short_string(buf, s);
+            encode_short_string(buf, s)?;
         }
         if let Some(ref s) = self.reply_to {
-            encode_short_string(buf, s);
+            encode_short_string(buf, s)?;
         }
         if let Some(ref s) = self.expiration {
-            encode_short_string(buf, s);
+            encode_short_string(buf, s)?;
         }
         if let Some(ref s) = self.message_id {
-            encode_short_string(buf, s);
+            encode_short_string(buf, s)?;
         }
         if let Some(v) = self.timestamp {
             buf.put_u64(v);
         }
         if let Some(ref s) = self.message_type {
-            encode_short_string(buf, s);
+            encode_short_string(buf, s)?;
         }
         if let Some(ref s) = self.user_id {
-            encode_short_string(buf, s);
+            encode_short_string(buf, s)?;
         }
         if let Some(ref s) = self.app_id {
-            encode_short_string(buf, s);
+            encode_short_string(buf, s)?;
         }
         if let Some(ref s) = self.cluster_id {
-            encode_short_string(buf, s);
+            encode_short_string(buf, s)?;
         }
+        Ok(())
     }
 
     pub fn decode(buf: &mut Bytes) -> Result<Self, ProtocolError> {
@@ -276,7 +277,7 @@ mod tests {
     fn test_empty_properties_round_trip() {
         let props = BasicProperties::default();
         let mut buf = BytesMut::new();
-        props.encode(&mut buf);
+        props.encode(&mut buf).unwrap();
         let mut bytes = buf.freeze();
         let decoded = BasicProperties::decode(&mut bytes).unwrap();
         assert_eq!(props, decoded);
@@ -305,7 +306,7 @@ mod tests {
         };
 
         let mut buf = BytesMut::new();
-        props.encode(&mut buf);
+        props.encode(&mut buf).unwrap();
         let mut bytes = buf.freeze();
         let decoded = BasicProperties::decode(&mut bytes).unwrap();
         assert_eq!(props, decoded);
@@ -321,7 +322,7 @@ mod tests {
         };
 
         let mut buf = BytesMut::new();
-        props.encode(&mut buf);
+        props.encode(&mut buf).unwrap();
         let mut bytes = buf.freeze();
         let decoded = BasicProperties::decode(&mut bytes).unwrap();
         assert_eq!(props, decoded);
@@ -338,7 +339,7 @@ mod tests {
 
         let expected = props.encoded_size();
         let mut buf = BytesMut::new();
-        props.encode(&mut buf);
+        props.encode(&mut buf).unwrap();
         assert_eq!(buf.len(), expected);
     }
 }
