@@ -14,6 +14,8 @@ pub enum PasswordError {
     UnknownAlgorithm(String),
     #[error("HMAC error: invalid key length")]
     HmacInvalidKeyLength,
+    #[error("invalid hex in stored hash")]
+    InvalidHex,
 }
 
 /// Supported password hashing algorithms.
@@ -66,9 +68,9 @@ pub fn verify_password(
         HashAlgorithm::Sha256 => {
             if let Some((salt_hex, hash_hex)) = hash.split_once(':') {
                 // New salted HMAC format
-                let salt = hex::decode(salt_hex);
+                let salt = hex::decode(salt_hex)?;
                 let mac = hmac_sha256(&salt, password.as_bytes())?;
-                let expected = hex::decode(hash_hex);
+                let expected = hex::decode(hash_hex)?;
                 Ok(mac.ct_eq(&expected).into())
             } else {
                 // Legacy unsalted format
@@ -77,15 +79,15 @@ pub fn verify_password(
                      re-hash with a salted algorithm"
                 );
                 let mac = legacy_sha256(password.as_bytes());
-                let expected = hex::decode(hash);
+                let expected = hex::decode(hash)?;
                 Ok(mac.ct_eq(&expected).into())
             }
         }
         HashAlgorithm::Sha512 => {
             if let Some((salt_hex, hash_hex)) = hash.split_once(':') {
-                let salt = hex::decode(salt_hex);
+                let salt = hex::decode(salt_hex)?;
                 let mac = hmac_sha512(&salt, password.as_bytes())?;
-                let expected = hex::decode(hash_hex);
+                let expected = hex::decode(hash_hex)?;
                 Ok(mac.ct_eq(&expected).into())
             } else {
                 tracing::warn!(
@@ -93,11 +95,12 @@ pub fn verify_password(
                      re-hash with a salted algorithm"
                 );
                 let mac = legacy_sha512(password.as_bytes());
-                let expected = hex::decode(hash);
+                let expected = hex::decode(hash)?;
                 Ok(mac.ct_eq(&expected).into())
             }
         }
-        HashAlgorithm::Plaintext => Ok(password == hash),
+        // Plaintext is for development/testing only — not safe for production.
+        HashAlgorithm::Plaintext => Ok(password.as_bytes().ct_eq(hash.as_bytes()).into()),
     }
 }
 
@@ -144,10 +147,16 @@ mod hex {
         bytes.as_ref().iter().map(|b| format!("{b:02x}")).collect()
     }
 
-    pub fn decode(hex_str: &str) -> Vec<u8> {
+    pub fn decode(hex_str: &str) -> Result<Vec<u8>, super::PasswordError> {
+        if !hex_str.len().is_multiple_of(2) {
+            return Err(super::PasswordError::InvalidHex);
+        }
         (0..hex_str.len())
             .step_by(2)
-            .map(|i| u8::from_str_radix(&hex_str[i..i + 2], 16).unwrap_or(0))
+            .map(|i| {
+                u8::from_str_radix(&hex_str[i..i + 2], 16)
+                    .map_err(|_| super::PasswordError::InvalidHex)
+            })
             .collect()
     }
 }
@@ -226,6 +235,21 @@ mod tests {
         assert!(!legacy_hash.contains(':'));
         assert!(verify_password("secret", &legacy_hash, &HashAlgorithm::Sha512).unwrap());
         assert!(!verify_password("wrong", &legacy_hash, &HashAlgorithm::Sha512).unwrap());
+    }
+
+    #[test]
+    fn test_malformed_hex_returns_error() {
+        // Odd-length hex
+        let result = verify_password("secret", "abc:def", &HashAlgorithm::Sha256);
+        assert!(result.is_err());
+
+        // Invalid hex chars
+        let result = verify_password(
+            "secret",
+            "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz:0000",
+            &HashAlgorithm::Sha256,
+        );
+        assert!(result.is_err());
     }
 
     #[test]
