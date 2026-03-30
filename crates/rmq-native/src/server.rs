@@ -155,6 +155,15 @@ async fn handle_client(
                         batch_size,
                         prefetch,
                     } if auth_user.is_some() => {
+                        // Check read permission
+                        if let Some(ref user) = auth_user {
+                            if !user.can_read(vhost.name(), &queue) {
+                                tracing::warn!(
+                                    "consume denied: no read permission for queue {queue}"
+                                );
+                                break;
+                            }
+                        }
                         // Ensure queue exists
                         let _ = vhost.declare_queue(QueueConfig {
                             name: queue.clone(),
