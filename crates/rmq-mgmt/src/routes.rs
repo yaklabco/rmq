@@ -1160,11 +1160,7 @@ mod tests {
             .set_permissions(
                 "alice",
                 "/",
-                Permission {
-                    configure: ".*".to_string(),
-                    write: ".*".to_string(),
-                    read: ".*".to_string(),
-                },
+                Permission::new(".*".to_string(), ".*".to_string(), ".*".to_string()),
             )
             .unwrap();
 
